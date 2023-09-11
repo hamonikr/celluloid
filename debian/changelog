@@ -1,3 +1,10 @@
+celluloid (0.21.1-z9hamonikr1) stable; urgency=medium
+
+  * Release on ubuntu 22.04
+   - change compat as 10
+  
+ -- HamoniKR <pkg@hamonikr.org>  Mon, 11 Sep 2023 12:12:00 +0900
+
 celluloid (0.21.1-hamonikr1) uma; urgency=medium
 
   * Fix celluloid-video-area.c
