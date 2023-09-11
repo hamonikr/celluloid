@@ -1,3 +1,9 @@
+celluloid (0.21.1-z9hamonikr2) stable; urgency=medium
+
+  * Apply Korean translation
+  
+ -- HamoniKR <pkg@hamonikr.org>  Mon, 11 Sep 2023 12:21:23 +0900
+
 celluloid (0.21.1-z9hamonikr1) stable; urgency=medium
 
   * Release on ubuntu 22.04
