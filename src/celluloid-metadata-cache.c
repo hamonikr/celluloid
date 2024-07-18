@@ -19,7 +19,6 @@
 
 #include "celluloid-metadata-cache.h"
 #include "celluloid-mpv.h"
-#include "celluloid-mpv-wrapper.h"
 
 struct _CelluloidMetadataCache
 {
@@ -240,14 +239,10 @@ fetch_metadata(CelluloidMetadataCache *cache)
 	celluloid_mpv_set_option_string(cache->fetcher, "ytdl", "yes");
 	celluloid_mpv_initialize(cache->fetcher);
 
-	for(	gchar *uri = g_queue_pop_tail(cache->fetch_queue);
-		uri;
-		uri = g_queue_pop_tail(cache->fetch_queue) )
-	{
-		g_debug("Queuing %s for metadata fetch", uri);
-		celluloid_mpv_load_file(cache->fetcher, uri, TRUE);
-		g_free(uri);
-	}
+	gchar *uri = g_queue_pop_tail(cache->fetch_queue);
+	g_debug("Queuing %s for metadata fetch", uri);
+	celluloid_mpv_load_file(cache->fetcher, uri, TRUE);
+	g_free(uri);
 
 	cache->fetch_timeout_id = 0;
 

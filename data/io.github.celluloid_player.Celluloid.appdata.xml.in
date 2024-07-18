@@ -1,18 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Copyright 2015-2021 gnome-mpv -->
+<!-- Copyright 2015-2024 gnome-mpv -->
 <component type="desktop">
  <id>io.github.celluloid_player.Celluloid</id>
  <metadata_license>CC-BY-SA-4.0</metadata_license>
  <project_license>GPL-3.0+</project_license>
  <name>Celluloid</name>
- <summary>GTK+ frontend for mpv</summary>
+ <summary>Plays videos</summary>
  <launchable type="desktop-id">io.github.celluloid_player.Celluloid.desktop</launchable>
  <translation type="gettext">celluloid</translation>
  <content_rating type="oars-1.1" />
  <provides>
   <id>io.github.GnomeMpv.desktop</id>
  </provides>
- <description>
+ <description translate="no">
   <p>
     Celluloid is a simple media player that can play virtually all video and
     audio formats. It supports playlists and MPRIS2 media player controls. The
@@ -27,10 +27,228 @@
    <li>MPRIS2 D-Bus interface</li>
   </ul>
  </description>
- <developer_name>The Celluloid Developers</developer_name>
+ <developer id="io.github.gnome-mpv">
+	 <name>The Celluloid Developers</name>
+ </developer>
  <releases>
+  <release date="2024-06-24" version="0.27">
+   <description translate="no">
+    <p>
+     This release contains the following changes:
+    </p>
+    <ul>
+     <li>
+      Add a loading screen that gets displayed during initialization and
+      buffering.
+     </li>
+     <li>
+      Reduce the time it takes for the main window to get displayed after
+      launching.
+     </li>
+     <li>
+      Opening and closing the preferences dialog will no longer trigger an mpv
+      reset unless options that require it are changed.
+     </li>
+     <li>
+      Update the look for controls and header bar in floating mode.
+     </li>
+     <li>
+      Update some of the deprecated GTK API usage.
+     </li>
+     <li>
+      Add support for multi-file user scripts.
+     </li>
+    </ul>
+    <p>
+     This listing is incomplete. See git log for complete changelog.
+    </p>
+   </description>
+  </release>
+  <release date="2023-09-16" version="0.26">
+   <description translate="no">
+    <p>
+     This release contains the following changes:
+    </p>
+    <ul>
+      <li>
+       Fix a bug where the header bar keeps hiding even when a menu is open.
+      </li>
+      <li>
+       Use toasts instead of dialog to report mpv errors.
+      </li>
+      <li>
+       Change default screenshot format to PNG.
+      </li>
+      <li>
+       Fix crash that happens when the mpv-config-file key in GSettings
+       contains a path rather than a URI.
+      </li>
+      <li>
+       Expose the Position MPRIS property.
+      </li>
+      <li>
+       Use the numeric style class for the time/duration label, which stops it
+       from jumping around as it changes.
+      </li>
+    </ul>
+    <p>
+     This listing is incomplete. See git log for complete changelog.
+    </p>
+   </description>
+  </release>
+  <release date="2023-03-26" version="0.25">
+   <description translate="no">
+    <p>
+     This release contains the following changes:
+    </p>
+    <ul>
+      <li>
+        Fix crash when using multiple windows.
+      </li>
+      <li>
+        Port the about dialog to libadwaita.
+      </li>
+      <li>
+        Fix cursor not autohiding on KDE.
+      </li>
+      <li>
+        Fix mouse presses/releases becoming unreliable during playback.
+      </li>
+      <li>
+        Make it possible to build on Windows. Celluloid still crashes on mouse
+        clicks, but it runs and can play videos.
+      </li>
+      <li>
+        Add Estonian translation by vaba.
+      </li>
+      <li>
+        Add Georgian translation by temuri doghonadze.
+      </li>
+      <li>
+        Add Lithuanian translation by Jonas Smol.
+      </li>
+      <li>
+        Add Occitan translation by Quentin PAGÈS.
+      </li>
+      <li>
+        Add Tamil translation by K.B.Dharun Krishna.
+      </li>
+    </ul>
+    <p>
+     This listing is incomplete. See git log for complete changelog.
+    </p>
+   </description>
+  </release>
+  <release date="2022-08-20" version="0.24">
+   <description translate="no">
+    <p>
+     This release contains the following changes:
+    </p>
+    <ul>
+     <li>
+      Add Malay translation by @dinazmi.
+     </li>
+     <li>
+      Use libadwaita.
+     </li>
+     <li>
+      Fix on_load hook in scripts not triggering.
+     </li>
+     <li>
+      Add option to make the video area draggable.
+     </li>
+     <li>
+      Fix autofit breaking when playing small videos.
+     </li>
+     <li>
+      Make controls layout adaptive.
+     </li>
+     <li>
+      Display chapter marks in the seek bar.
+     </li>
+     <li>
+      Display chapter titles in the seek bar popover.
+     </li>
+    </ul>
+    <p>
+     This listing is incomplete. See git log for complete changelog.
+    </p>
+   </description>
+  </release>
+  <release date="2022-03-07" version="0.23">
+   <description translate="no">
+    <p>
+     This is mostly a bugfix release. It contains the following changes:
+    </p>
+    <ul>
+     <li>
+      Fix autofit triggering regardless of settings.
+     </li>
+     <li>
+      Fix window size shrinking across sessions.
+     </li>
+     <li>
+      Fix crash when playing files with names containing invalid encoding.
+     </li>
+     <li>
+      Fix drag-and-drop not working with some file managers.
+     </li>
+     <li>
+      Fix playback starting when the last playlist item is removed.
+     </li>
+    </ul>
+    <p>
+     This listing is incomplete. See git log for complete changelog.
+    </p>
+   </description>
+  </release>
+  <release date="2021-11-05" version="0.22">
+   <description translate="no">
+    <p>
+     This release contains the following changes:
+    </p>
+    <ul>
+     <li>
+      Migrate to GTK4.
+     </li>
+     <li>
+      Add Greek translation by @lepa22.
+     </li>
+     <li>
+      Add Korean translation by @jullee96.
+     </li>
+     <li>
+      Add Norwegian Bokmål translation by Allan Nordhøy.
+     </li>
+     <li>
+      Add Occidental translation by OIS.
+     </li>
+     <li>
+      Add Arabic translation by Mohamed Benkouider.
+     </li>
+     <li>
+      Add Urdu translation by Ahmed Iqbal.
+     </li>
+     <li>
+      Add option to show title buttons in fullscreen mode.
+     </li>
+     <li>
+      Add option to present the window when opening files.
+     </li>
+     <li>
+      Change default screenshot filename template to FILENAME-TIMESTAMP (%f-%P).
+     </li>
+     <li>
+      Fix inaccurate timestamp preview.
+     </li>
+    </ul>
+    <p>
+     This listing is incomplete. See git log for complete changelog.
+    </p>
+   </description>
+  </release>
   <release date="2021-03-22" version="0.21">
-   <description>
+   <description translate="no">
     <p>
      This release contains the following changes:
     </p>
@@ -65,7 +283,7 @@
    </description>
   </release>
   <release date="2020-09-19" version="0.20">
-   <description>
+   <description translate="no">
     <p>
      This release contains the following changes:
     </p>
@@ -104,7 +322,7 @@
    </description>
   </release>
   <release date="2020-04-08" version="0.19">
-   <description>
+   <description translate="no">
     <p>
      This release contains the following changes:
     </p>
@@ -157,7 +375,7 @@
    </description>
   </release>
   <release date="2019-11-05" version="0.18">
-   <description>
+   <description translate="no">
     <p>
      This release contains the following changes:
     </p>
@@ -187,7 +405,7 @@
    </description>
   </release>
   <release date="2019-08-08" version="0.17">
-   <description>
+   <description translate="no">
     <p>
      This release contains the following changes:
     </p>
@@ -226,7 +444,7 @@
    </description>
   </release>
   <release date="2019-01-21" version="0.16">
-   <description>
+   <description translate="no">
     <p>
      This release contains the following changes:
     </p>
@@ -257,7 +475,7 @@
    </description>
   </release>
   <release date="2018-09-08" version="0.15">
-   <description>
+   <description translate="no">
     <p>
      This release contains the following changes:
     </p>
@@ -285,7 +503,7 @@
    </description>
   </release>
   <release date="2018-02-17" version="0.14">
-   <description>
+   <description translate="no">
     <p>
      This release contains the following changes:
     </p>
@@ -316,20 +534,21 @@
  </releases>
  <screenshots>
   <screenshot type="default">
-   <image>http://celluloid-player.github.io/images/screenshot-0.png</image>
+   <image>https://celluloid-player.github.io/images/screenshot-0.png</image>
    <caption>The main window showing the application in action</caption>
   </screenshot>
   <screenshot>
-   <image>http://celluloid-player.github.io/images/screenshot-1.png</image>
+   <image>https://celluloid-player.github.io/images/screenshot-1.png</image>
    <caption>The main window with CSD disabled</caption>
   </screenshot>
   <screenshot>
-   <image>http://celluloid-player.github.io/images/screenshot-2.png</image>
+   <image>https://celluloid-player.github.io/images/screenshot-2.png</image>
    <caption>The main window with playlist open</caption>
   </screenshot>
  </screenshots>
- <url type="homepage">http://celluloid-player.github.io</url>
- <url type="bugtracker">http://github.com/celluloid-player/celluloid/issues</url>
- <url type="translate">http://translate.zanata.org/project/view/celluloid</url>
- <update_contact>gnome-mpv_at_teknik.io</update_contact>
+ <url type="homepage">https://celluloid-player.github.io</url>
+ <url type="bugtracker">https://github.com/celluloid-player/celluloid/issues</url>
+ <url type="donation">https://paypal.me/CelluloidProject</url>
+ <url type="translate">https://hosted.weblate.org/projects/celluloid/</url>
+ <update_contact>gnome-mpv@km.away.im</update_contact>
 </component>

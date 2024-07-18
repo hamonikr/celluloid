@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2019 gnome-mpv
+ * Copyright (c) 2017-2021 gnome-mpv
  *
  * This file is part of Celluloid.
  *
@@ -23,7 +23,6 @@
 #include "celluloid-model.h"
 #include "celluloid-view.h"
 #include "mpris/celluloid-mpris.h"
-#include "media-keys/celluloid-media-keys.h"
 
 G_BEGIN_DECLS
 
@@ -34,24 +33,28 @@ enum
 	PROP_READY,
 	PROP_IDLE,
 	PROP_USE_SKIP_BUTTONS_FOR_PLAYLIST,
+	PROP_DARK_THEME_ENABLE,
 	N_PROPERTIES
 };
 
 struct _CelluloidController
 {
 	GObject parent;
+
+	GtkEventController *key_controller;
+
 	CelluloidApplication *app;
 	CelluloidModel *model;
 	CelluloidView *view;
 	gboolean ready;
 	gboolean idle;
 	gboolean use_skip_buttons_for_playlist;
+	gboolean dark_theme_enable;
 	gint64 target_playlist_pos;
 	guint update_seekbar_id;
 	guint resize_timeout_tag;
 	GBinding *skip_buttons_binding;
 	GSettings *settings;
-	CelluloidMediaKeys *media_keys;
 	CelluloidMpris *mpris;
 };
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2020 gnome-mpv
+ * Copyright (c) 2015-2020, 2023 gnome-mpv
  *
  * This file is part of Celluloid.
  *
@@ -233,7 +233,7 @@ celluloid_menu_build_full(	GMenu *menu,
 
 	const CelluloidMenuEntry entries[]
 		= {	CELLULOID_MENU_SUBMENU(_("_File"), NULL),
-			CELLULOID_MENU_ITEM(_("_Open…"), "win.show-open-dialog((false, false))"),
+			CELLULOID_MENU_ITEM(_("_Open File…"), "win.show-open-dialog((false, false))"),
 			CELLULOID_MENU_ITEM(_("Open _Folder…"), "win.show-open-dialog((true, false))"),
 			CELLULOID_MENU_ITEM(_("Open _Location…"), "win.show-open-location-dialog(false)"),
 			CELLULOID_MENU_SUBMENU(_("Open _Disc…"), disc_menu),
@@ -247,7 +247,6 @@ celluloid_menu_build_full(	GMenu *menu,
 			CELLULOID_MENU_SUBMENU(_("S_ubtitle Track"), subtitle_menu),
 			CELLULOID_MENU_SUBMENU(_("_View"), NULL),
 			CELLULOID_MENU_ITEM(_("_Toggle Controls"), "win.toggle-controls"),
-			CELLULOID_MENU_ITEM(_("_Toggle Playlist"), "win.toggle-playlist"),
 			CELLULOID_MENU_ITEM(_("_Fullscreen"), "win.toggle-fullscreen"),
 			CELLULOID_MENU_SUBMENU(_("_Help"), NULL),
 			CELLULOID_MENU_ITEM(_("_Keyboard Shortcuts"), "win.show-shortcuts-dialog"),
@@ -286,7 +285,6 @@ celluloid_menu_build_menu_btn(GMenu *menu, const GPtrArray *track_list)
 		= {	CELLULOID_MENU_SEPARATOR,
 			CELLULOID_MENU_ITEM(_("_Toggle Controls"), "win.toggle-controls"),
 			CELLULOID_MENU_SEPARATOR,
-			CELLULOID_MENU_ITEM(_("_Toggle Playlist"), "win.toggle-playlist"),
 			CELLULOID_MENU_ITEM(_("_Save Playlist"), "win.save-playlist"),
 			CELLULOID_MENU_SEPARATOR,
 			CELLULOID_MENU_SUBMENU(_("_Video Track"), video_menu),
@@ -315,7 +313,7 @@ celluloid_menu_build_open_btn(GMenu *menu, const GPtrArray *disc_list)
 
 	const CelluloidMenuEntry entries[]
 		= {	CELLULOID_MENU_SEPARATOR,
-			CELLULOID_MENU_ITEM(_("_Open…"), "win.show-open-dialog((false, false))"),
+			CELLULOID_MENU_ITEM(_("_Open File…"), "win.show-open-dialog((false, false))"),
 			CELLULOID_MENU_ITEM(_("Open _Folder…"), "win.show-open-dialog((true, false))"),
 			CELLULOID_MENU_ITEM(_("Open _Location…"), "win.show-open-location-dialog(false)"),
 			CELLULOID_MENU_SUBMENU(_("Open _Disc"), disc_menu),

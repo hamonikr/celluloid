@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2021 gnome-mpv
+ * Copyright (c) 2017-2023 gnome-mpv
  *
  * This file is part of Celluloid.
  *
@@ -18,6 +18,12 @@
  */
 
 #include <glib/gi18n.h>
+#include <gdk/gdk.h>
+#include <adwaita.h>
+
+#ifdef GDK_WINDOWING_WAYLAND
+#include <gdk/wayland/gdkwayland.h>
+#endif
 
 #include "celluloid-view.h"
 #include "celluloid-file-chooser.h"
@@ -35,18 +41,18 @@ enum
 	PROP_0,
 	PROP_PLAYLIST_COUNT,
 	PROP_PAUSE,
+	PROP_IDLE_ACTIVE,
 	PROP_VOLUME,
 	PROP_VOLUME_MAX,
 	PROP_DURATION,
 	PROP_PLAYLIST_POS,
+	PROP_CHAPTER_LIST,
 	PROP_TRACK_LIST,
 	PROP_DISC_LIST,
 	PROP_SKIP_ENABLED,
 	PROP_LOOP,
 	PROP_SHUFFLE,
-	PROP_BORDER,
-	PROP_FULLSCREEN,
-	PROP_MAXIMIZED,
+	PROP_MEDIA_TITLE,
 	PROP_DISPLAY_FPS,
 	PROP_SEARCHING,
 	N_PROPERTIES
@@ -61,19 +67,19 @@ struct _CelluloidView
 	/* Properties */
 	gint playlist_count;
 	gboolean pause;
+	gboolean idle_active;
 	gdouble volume;
 	gdouble volume_max;
 	gdouble duration;
 	gint playlist_pos;
+	GPtrArray *chapter_list;
 	GPtrArray *track_list;
 	GPtrArray *disc_list;
 	gboolean skip_enabled;
 	gboolean control_box_enabled;
 	gboolean loop;
 	gboolean shuffle;
-	gboolean border;
-	gboolean fullscreen;
-	gboolean maximized;
+	gchar *media_title;
 	gdouble display_fps;
 	gboolean searching;
 };
@@ -113,14 +119,14 @@ static void
 save_playlist(CelluloidView *view, GFile *file, GError **error);
 
 static void
+update_title(CelluloidView *view);
+
+static void
 show_message_dialog(	CelluloidView *view,
 			GtkMessageType type,
 			const gchar *title,
 			const gchar *prefix,
 			const gchar *msg );
-
-static void
-update_display_fps(CelluloidView *view);
 
 static void
 show_open_track_dialog(CelluloidView  *view, TrackType type);
@@ -145,44 +151,37 @@ open_track_dialog_response_handler(	GtkDialog *dialog,
 					gpointer data );
 
 static void
-preferences_dialog_response_handler(	GtkDialog *dialog,
-					gint response_id,
-					gpointer data );
+save_playlist_response_handler(	GtkDialog *dialog,
+				gint response_id,
+				gpointer data );
+
+static gboolean
+mpv_reset_request_handler(AdwPreferencesWindow *dialog, gpointer data);
 
 static void
 realize_handler(GtkWidget *widget, gpointer data);
 
 static void
-size_allocate_handler(	GtkWidget *widget,
-			GdkRectangle *allocation,
-			gpointer data );
+notify_mapped_handler(GdkSurface *surface, GParamSpec *pspec,  gpointer data);
+
+static void
+resize_handler(	CelluloidVideoArea *video_area,
+		gint width,
+		gint height,
+		gpointer data );
 
 static void
 render_handler(CelluloidVideoArea *area, gpointer data);
 
 static gboolean
-draw_handler(GtkWidget *widget, cairo_t *cr, gpointer data);
-
-static void
-drag_data_handler(	GtkWidget *widget,
-			GdkDragContext *context,
-			gint x,
-			gint y,
-			GtkSelectionData *sel_data,
-			guint info,
-			guint time,
-			gpointer data );
+drop_handler(	GtkDropTarget *self,
+		GValue *value,
+		gdouble x,
+		gdouble y,
+		gpointer data );
 
 static gboolean
-window_state_handler(GtkWidget *widget, GdkEvent *event, gpointer data);
-
-static void
-screen_changed_handler(	GtkWidget *wnd,
-			GdkScreen *previous_screen,
-			gpointer data );
-
-static gboolean
-delete_handler(GtkWidget *widget, GdkEvent *event, gpointer data);
+close_request_handler(GtkWidget *widget, gpointer data);
 
 static void
 playlist_row_activated_handler(	CelluloidPlaylistWidget *playlist,
@@ -221,11 +220,11 @@ constructed(GObject *object)
 	CelluloidControlBox *control_box =
 		celluloid_main_window_get_control_box(wnd);
 
+	g_object_bind_property(	view, "chapter-list",
+				control_box, "chapter-list",
+				G_BINDING_DEFAULT );
 	g_object_bind_property(	view, "duration",
 				control_box, "duration",
-				G_BINDING_DEFAULT );
-	g_object_bind_property(	wnd, "is-maximized",
-				view, "maximized",
 				G_BINDING_DEFAULT );
 	g_object_bind_property(	view, "pause",
 				control_box, "pause",
@@ -247,42 +246,53 @@ constructed(GObject *object)
 				G_BINDING_DEFAULT );
 	g_object_bind_property(	playlist, "playlist-count",
 				view, "playlist-count",
-				G_BINDING_DEFAULT );
+				G_BINDING_DEFAULT | G_BINDING_SYNC_CREATE );
 	g_object_bind_property(	playlist, "searching",
 				view, "searching",
 				G_BINDING_BIDIRECTIONAL );
 
 	celluloid_main_window_load_state(wnd);
-	load_css(view);
 	load_settings(view);
 
 	g_signal_connect(	video_area,
-				"size-allocate",
-				G_CALLBACK(size_allocate_handler),
+				"resize",
+				G_CALLBACK(resize_handler),
 				view );
 	g_signal_connect(	video_area,
 				"render",
 				G_CALLBACK(render_handler),
 				view );
-	g_signal_connect(	video_area,
-				"drag-data-received",
-				G_CALLBACK(drag_data_handler),
+
+	GType types[] = {GDK_TYPE_FILE_LIST, G_TYPE_STRING};
+
+	GtkDropTarget *video_area_drop_target =
+		gtk_drop_target_new(G_TYPE_INVALID, GDK_ACTION_COPY);
+
+	gtk_drop_target_set_gtypes
+		(video_area_drop_target, types, G_N_ELEMENTS(types));
+	gtk_widget_add_controller
+		(	GTK_WIDGET(video_area),
+			GTK_EVENT_CONTROLLER(video_area_drop_target) );
+	g_signal_connect(	video_area_drop_target,
+				"drop",
+				G_CALLBACK(drop_handler),
 				view );
-	g_signal_connect(	playlist,
-				"drag-data-received",
-				G_CALLBACK(drag_data_handler),
+
+	GtkDropTarget *playlist_drop_target =
+		gtk_drop_target_new(G_TYPE_INVALID, GDK_ACTION_COPY);
+	gtk_drop_target_set_gtypes
+		(playlist_drop_target, types, G_N_ELEMENTS(types));
+	gtk_widget_add_controller
+		(	GTK_WIDGET(playlist),
+			GTK_EVENT_CONTROLLER(playlist_drop_target) );
+	g_signal_connect(	playlist_drop_target,
+				"drop",
+				G_CALLBACK(drop_handler),
 				view );
+
 	g_signal_connect(	wnd,
-				"window-state-event",
-				G_CALLBACK(window_state_handler),
-				view );
-	g_signal_connect(	wnd,
-				"screen-changed",
-				G_CALLBACK(screen_changed_handler),
-				view );
-	g_signal_connect(	wnd,
-				"delete-event",
-				G_CALLBACK(delete_handler),
+				"close-request",
+				G_CALLBACK(close_request_handler),
 				view );
 	g_signal_connect(	playlist,
 				"row-activated",
@@ -334,6 +344,8 @@ set_property(	GObject *object,
 		case PROP_PLAYLIST_COUNT:
 		self->playlist_count = g_value_get_int(value);
 
+		update_title(self);
+
 		g_object_set(	control_box,
 				"enabled",
 				self->playlist_count > 0,
@@ -347,6 +359,11 @@ set_property(	GObject *object,
 
 		case PROP_PAUSE:
 		self->pause = g_value_get_boolean(value);
+		break;
+
+		case PROP_IDLE_ACTIVE:
+		self->idle_active = g_value_get_boolean(value);
+		update_title(self);
 		break;
 
 		case PROP_VOLUME:
@@ -371,6 +388,11 @@ set_property(	GObject *object,
 			(playlist, self->playlist_pos);
 		break;
 
+		case PROP_CHAPTER_LIST:
+		self->chapter_list = g_value_get_pointer(value);
+		// TODO: run updates
+		break;
+
 		case PROP_TRACK_LIST:
 		self->track_list = g_value_get_pointer(value);
 		celluloid_main_window_update_track_list(wnd, self->track_list);
@@ -393,37 +415,10 @@ set_property(	GObject *object,
 		self->shuffle = g_value_get_boolean(value);
 		break;
 
-		case PROP_BORDER:
-		self->border = g_value_get_boolean(value);
-		{
-			GtkWidget *titlebar =
-				gtk_window_get_titlebar(GTK_WINDOW(wnd));
-
-			if(titlebar)
-			{
-				gtk_widget_set_visible(titlebar, self->border);
-			}
-
-			gtk_window_set_decorated(GTK_WINDOW(wnd), self->border);
-		}
-		break;
-
-		case PROP_FULLSCREEN:
-		self->fullscreen = g_value_get_boolean(value);
-		celluloid_main_window_set_fullscreen(wnd, self->fullscreen);
-		break;
-
-		case PROP_MAXIMIZED:
-		self->maximized = g_value_get_boolean(value);
-
-		if(self->maximized)
-		{
-			gtk_window_maximize(GTK_WINDOW(wnd));
-		}
-		else
-		{
-			gtk_window_unmaximize(GTK_WINDOW(wnd));
-		}
+		case PROP_MEDIA_TITLE:
+		g_free(self->media_title);
+		self->media_title = g_value_dup_string(value);
+		update_title(self);
 		break;
 
 		case PROP_DISPLAY_FPS:
@@ -433,8 +428,9 @@ set_property(	GObject *object,
 		case PROP_SEARCHING:
 		// We do not display playlist in fullscreen mode so refuse to
 		// enter search mode here if we're in fullscreen mode.
-		self->searching =	!self->fullscreen &&
-					g_value_get_boolean(value);
+		self->searching =
+			!gtk_window_is_fullscreen(GTK_WINDOW(self)) &&
+			g_value_get_boolean(value);
 
 		// Show playlist if we're about to enter search mode and it
 		// isn't already visible.
@@ -468,6 +464,10 @@ get_property(	GObject *object,
 		g_value_set_boolean(value, self->pause);
 		break;
 
+		case PROP_IDLE_ACTIVE:
+		g_value_set_boolean(value, self->idle_active);
+		break;
+
 		case PROP_VOLUME:
 		g_value_set_double(value, self->volume);
 		break;
@@ -482,6 +482,10 @@ get_property(	GObject *object,
 
 		case PROP_PLAYLIST_POS:
 		g_value_set_int(value, self->playlist_pos);
+		break;
+
+		case PROP_CHAPTER_LIST:
+		g_value_set_pointer(value, self->chapter_list);
 		break;
 
 		case PROP_TRACK_LIST:
@@ -504,16 +508,8 @@ get_property(	GObject *object,
 		g_value_set_boolean(value, self->shuffle);
 		break;
 
-		case PROP_BORDER:
-		g_value_set_boolean(value, self->border);
-		break;
-
-		case PROP_FULLSCREEN:
-		g_value_set_boolean(value, self->fullscreen);
-		break;
-
-		case PROP_MAXIMIZED:
-		g_value_set_boolean(value, self->maximized);
+		case PROP_MEDIA_TITLE:
+		g_value_set_static_string(value, self->media_title);
 		break;
 
 		case PROP_DISPLAY_FPS:
@@ -533,27 +529,33 @@ get_property(	GObject *object,
 static void
 load_css(CelluloidView *view)
 {
-	const gchar *style;
-	GtkCssProvider *style_provider;
-	gboolean css_loaded;
+	const gchar *style =
+		"celluloid-seek-bar slider { border-radius: 100%; }"
+		"celluloid-video-area { background-color: black; }"
+		".dialog-action-area { margin: -12px 12px 12px 0px; }"
+		".dialog-action-area > button { margin-left: 12px; }";
+	GtkCssProvider *style_provider =
+		gtk_css_provider_new();
 
-	style =	"celluloid-video-area{background-color: black}"
-		"celluloid-preferences-dialog .dialog-action-box{margin-right: 12px}";
-	style_provider = gtk_css_provider_new();
-	css_loaded =	gtk_css_provider_load_from_data
-			(style_provider, style, -1, NULL);
+	gtk_css_provider_load_from_data(style_provider, style, -1);
 
-	if(!css_loaded)
+	GdkSurface *surface = gtk_widget_get_surface(view);
+
+	if(surface)
 	{
-		g_warning ("Failed to apply background color css");
+		GdkDisplay *display = gdk_surface_get_display(surface);
+
+		gtk_style_context_add_provider_for_display
+			(	display,
+				GTK_STYLE_PROVIDER(style_provider),
+				GTK_STYLE_PROVIDER_PRIORITY_APPLICATION );
+
+		g_object_unref(style_provider);
 	}
-
-	gtk_style_context_add_provider_for_screen
-		(	gtk_window_get_screen(GTK_WINDOW(view)),
-			GTK_STYLE_PROVIDER(style_provider),
-			GTK_STYLE_PROVIDER_PRIORITY_APPLICATION );
-
-	g_object_unref(style_provider);
+	else
+	{
+		g_warning("Failed to load CSS: Surface not available");
+	}
 }
 
 static void
@@ -567,19 +569,12 @@ load_settings(CelluloidView *view)
 		celluloid_main_window_get_control_box(wnd);
 
 	gboolean csd_enable;
-	gboolean dark_theme_enable;
 
-	csd_enable =	g_settings_get_boolean
-			(settings, "csd-enable");
-	dark_theme_enable =	g_settings_get_boolean
-				(settings, "dark-theme-enable");
+	csd_enable =	g_settings_get_boolean (settings, "csd-enable");
 
 	g_object_set(	control_box,
 			"show-fullscreen-button", !csd_enable,
 			"skip-enabled", FALSE,
-			NULL );
-	g_object_set(	gtk_settings_get_default(),
-			"gtk-application-prefer-dark-theme", dark_theme_enable,
 			NULL );
 
 	g_object_unref(settings);
@@ -630,6 +625,24 @@ save_playlist(CelluloidView *view, GFile *file, GError **error)
 	g_ptr_array_free(playlist, TRUE);
 }
 
+static void
+update_title(CelluloidView *view)
+{
+	const gboolean use_media_title =
+		view->media_title &&
+		!view->idle_active &&
+		view->playlist_count > 0;
+	const gchar *title_source =
+		use_media_title ?
+		view->media_title :
+		g_get_application_name();
+	gchar *title =
+		sanitize_utf8(title_source, TRUE);
+
+	gtk_window_set_title(GTK_WINDOW(view), title);
+	g_free(title);
+}
+
 void
 show_message_dialog(	CelluloidView *view,
 			GtkMessageType type,
@@ -638,8 +651,6 @@ show_message_dialog(	CelluloidView *view,
 			const gchar *msg )
 {
 	GtkWidget *dialog = NULL;
-	GtkWidget *msg_area = NULL;
-	GList *children = NULL;
 
 	if(view->has_dialog)
 	{
@@ -684,22 +695,26 @@ show_message_dialog(	CelluloidView *view,
 
 	if(dialog)
 	{
-		view->has_dialog = TRUE;
-		msg_area =	gtk_message_dialog_get_message_area
-				(GTK_MESSAGE_DIALOG(dialog));
-		children = gtk_container_get_children(GTK_CONTAINER(msg_area));
+		GtkMessageDialog *message_dialog =
+			GTK_MESSAGE_DIALOG(dialog);
+		GtkWidget *message_area =
+			gtk_message_dialog_get_message_area(message_dialog);
+		GtkWidget *first_child =
+			gtk_widget_get_first_child(message_area);
 
-		for(GList *iter = children; iter; iter = g_list_next(iter))
+		view->has_dialog = TRUE;
+
+		for(	GtkWidget *child = first_child;
+			child;
+			child = gtk_widget_get_next_sibling(child) )
 		{
-			if(GTK_IS_LABEL(iter->data))
+			if(GTK_IS_LABEL(child))
 			{
-				gtk_label_set_line_wrap_mode
-					(	GTK_LABEL(iter->data),
+				gtk_label_set_wrap_mode
+					(	GTK_LABEL(child),
 						PANGO_WRAP_WORD_CHAR );
 			}
 		}
-
-		g_list_free(children);
 
 		g_signal_connect
 			(	dialog,
@@ -709,22 +724,8 @@ show_message_dialog(	CelluloidView *view,
 
 		gtk_window_set_title(GTK_WINDOW(dialog), title);
 		gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
-		gtk_widget_show_all(dialog);
+		gtk_widget_set_visible(dialog, TRUE);
 	}
-}
-
-static void
-update_display_fps(CelluloidView *view)
-{
-	GtkWidget *wnd = GTK_WIDGET(view);
-	GdkWindow *gdkwindow = gtk_widget_get_window(wnd);
-	GdkScreen *screen = gtk_window_get_screen(GTK_WINDOW(wnd));
-	GdkDisplay *display = gdk_screen_get_display(screen);
-	GdkMonitor *monitor =	gdk_display_get_monitor_at_window
-				(display, gdkwindow);
-
-	view->display_fps = gdk_monitor_get_refresh_rate(monitor)/1000.0;
-	g_object_notify(G_OBJECT(view), "display-fps");
 }
 
 static void
@@ -754,7 +755,8 @@ show_open_track_dialog(CelluloidView  *view, TrackType type)
 	CelluloidFileChooser *chooser =	celluloid_file_chooser_new
 					(	title,
 						GTK_WINDOW(view),
-						GTK_FILE_CHOOSER_ACTION_OPEN );
+						GTK_FILE_CHOOSER_ACTION_OPEN,
+						TRUE );
 
 	g_object_set_data(	G_OBJECT(chooser),
 				"track-type",
@@ -782,7 +784,7 @@ message_dialog_response_handler(	GtkDialog *dialog,
 {
 	CELLULOID_VIEW(data)->has_dialog = FALSE;
 
-	gtk_widget_destroy(GTK_WIDGET(dialog));
+	gtk_window_destroy(GTK_WINDOW(dialog));
 }
 
 static void
@@ -795,20 +797,16 @@ open_dialog_response_handler(GtkDialog *dialog, gint response_id, gpointer data)
 	if(response_id == GTK_RESPONSE_ACCEPT)
 	{
 		GtkFileChooser *chooser = GTK_FILE_CHOOSER(dialog);
-		GSList *uri_slist = gtk_file_chooser_get_filenames(chooser);
+		GListModel *files = gtk_file_chooser_get_files(chooser);
 
-		if(uri_slist)
+		if(files)
 		{
-			const gchar **uris = gslist_to_array(uri_slist);
-
-			g_signal_emit_by_name(view, "file-open", uris, *append);
-			g_free(uris);
+			g_signal_emit_by_name(view, "file-open", files, *append);
+			g_object_unref(files);
 		}
-
-		g_slist_free_full(uri_slist, g_free);
 	}
 
-	celluloid_file_chooser_destroy(dialog);
+	celluloid_file_chooser_destroy(CELLULOID_FILE_CHOOSER(dialog));
 
 	g_free(append);
 	g_ptr_array_free(args, TRUE);
@@ -819,27 +817,31 @@ open_location_dialog_response_handler(	GtkDialog *dialog,
 					gint response_id,
 					gpointer data )
 {
-	GPtrArray *args = data;
-	CelluloidView *view = g_ptr_array_index(args, 0);
-	gboolean *append = g_ptr_array_index(args, 1);
-
 	if(response_id == GTK_RESPONSE_ACCEPT)
 	{
-		CelluloidOpenLocationDialog *location_dialog;
-		const gchar *uris[2];
+		CelluloidOpenLocationDialog *location_dialog =
+			CELLULOID_OPEN_LOCATION_DIALOG(dialog);
+		const gchar *uri =
+			celluloid_open_location_dialog_get_string
+			(location_dialog);
 
-		location_dialog = CELLULOID_OPEN_LOCATION_DIALOG(dialog);
-		uris[0] =	celluloid_open_location_dialog_get_string
-				(location_dialog);
-		uris[1] = NULL;
+		GPtrArray *args = data;
+		CelluloidView *view = g_ptr_array_index(args, 0);
+		gboolean *append = g_ptr_array_index(args, 1);
 
-		g_signal_emit_by_name(view, "file-open", uris, *append);
+		GFile *file = g_file_new_for_uri(uri);
+		GListStore *list = g_list_store_new(G_TYPE_OBJECT);
+
+		g_list_store_append(list, file);
+
+		g_signal_emit_by_name(view, "file-open", list, *append);
+
+		g_object_unref(list);
+		g_free(append);
+		g_ptr_array_free(args, TRUE);
 	}
 
-	gtk_widget_destroy(GTK_WIDGET(dialog));
-
-	g_free(append);
-	g_ptr_array_free(args, TRUE);
+	gtk_window_close(GTK_WINDOW(dialog));
 }
 
 static void
@@ -850,7 +852,7 @@ open_track_dialog_response_handler(	GtkDialog *dialog,
 	if(response_id == GTK_RESPONSE_ACCEPT)
 	{
 		GtkFileChooser *chooser = GTK_FILE_CHOOSER(dialog);
-		GSList *uri_list = gtk_file_chooser_get_filenames(chooser);
+		GListModel *files = gtk_file_chooser_get_files(chooser);
 		const gchar *name = NULL;
 
 		TrackType type =
@@ -876,68 +878,121 @@ open_track_dialog_response_handler(	GtkDialog *dialog,
 			break;
 		}
 
-		for(GSList *iter = uri_list; iter; iter = g_slist_next(iter))
+		CelluloidView *view = CELLULOID_VIEW(data);
+		const guint n_items = g_list_model_get_n_items(files);
+
+		for(guint i = 0; i < n_items; i++)
 		{
-			g_signal_emit_by_name(data, name, *iter);
+			GFile *file = g_list_model_get_item(files, i);
+			gchar *uri = g_file_get_uri(file);
+
+			g_signal_emit_by_name(view, name, uri);
+			g_free(uri);
 		}
 
-		g_slist_free_full(uri_list, g_free);
+		g_object_unref(files);
 	}
 
 	celluloid_file_chooser_destroy(CELLULOID_FILE_CHOOSER(dialog));
 }
 
 static void
-preferences_dialog_response_handler(	GtkDialog *dialog,
-					gint response_id,
-					gpointer data )
+save_playlist_response_handler(	GtkDialog *dialog,
+				gint response_id,
+				gpointer data )
 {
+	CelluloidView *view = CELLULOID_VIEW(data);
+	GFile *dest_file = NULL;
+	GError *error = NULL;
+
 	if(response_id == GTK_RESPONSE_ACCEPT)
 	{
-		CelluloidMainWindow *wnd;
-		GSettings *settings;
-		gboolean csd_enable;
-
-		wnd = CELLULOID_MAIN_WINDOW(data);
-		settings = g_settings_new(CONFIG_ROOT);
-		csd_enable = g_settings_get_boolean(settings, "csd-enable");
-
-		if(celluloid_main_window_get_csd_enabled(wnd) != csd_enable)
-		{
-			show_message_dialog(	CELLULOID_VIEW(data),
-						GTK_MESSAGE_INFO,
-						g_get_application_name(),
-						NULL,
-						_("Enabling or disabling "
-						"client-side decorations "
-						"requires restarting to "
-						"take effect.") );
-		}
-
-		gtk_widget_queue_draw(GTK_WIDGET(wnd));
-		g_signal_emit_by_name(data, "preferences-updated");
-
-		g_object_unref(settings);
+		/* There should be only one file selected. */
+		dest_file = gtk_file_chooser_get_file(GTK_FILE_CHOOSER(dialog));
 	}
 
-	gtk_widget_destroy(GTK_WIDGET(dialog));
+	celluloid_file_chooser_destroy(CELLULOID_FILE_CHOOSER(dialog));
+
+	if(dest_file)
+	{
+		save_playlist(view, dest_file, &error);
+		g_object_unref(dest_file);
+	}
+
+	if(error)
+	{
+		show_message_dialog(	view,
+					GTK_MESSAGE_ERROR,
+					_("Error"),
+					NULL,
+					error->message );
+
+		g_error_free(error);
+	}
+}
+
+static gboolean
+mpv_reset_request_handler(AdwPreferencesWindow *dialog, gpointer data)
+{
+	CelluloidMainWindow *wnd;
+	GSettings *settings;
+	gboolean csd_enable;
+
+	wnd = CELLULOID_MAIN_WINDOW(data);
+	settings = g_settings_new(CONFIG_ROOT);
+	csd_enable = g_settings_get_boolean(settings, "csd-enable");
+
+	if(celluloid_main_window_get_csd_enabled(wnd) != csd_enable)
+	{
+		show_message_dialog(	CELLULOID_VIEW(data),
+					GTK_MESSAGE_INFO,
+					g_get_application_name(),
+					NULL,
+					_("Enabling or disabling "
+					"client-side decorations "
+					"requires restarting to "
+					"take effect.") );
+	}
+
+	gtk_widget_queue_draw(GTK_WIDGET(wnd));
+	g_signal_emit_by_name(data, "mpv-reset-request");
+
+	g_object_unref(settings);
+
+	return FALSE;
 }
 
 static void
 realize_handler(GtkWidget *widget, gpointer data)
 {
-	update_display_fps(CELLULOID_VIEW(widget));
+	CelluloidView *view = CELLULOID_VIEW(widget);
+	GdkSurface *surface = gtk_widget_get_surface(view);
+
+	g_signal_connect(	surface,
+				"notify::mapped",
+				G_CALLBACK(notify_mapped_handler),
+				widget );
+
+	load_css(view);
 }
 
 static void
-size_allocate_handler(	GtkWidget *widget,
-			GdkRectangle *allocation,
-			gpointer data )
+notify_mapped_handler(GdkSurface *surface, GParamSpec *pspec, gpointer data)
 {
-	g_signal_emit_by_name(	data,
-				"video-area-resize",
-				allocation->width,
-				allocation->height );
+	g_signal_handlers_disconnect_by_func(	surface,
+						notify_mapped_handler,
+						data );
+
+	g_signal_emit_by_name(CELLULOID_VIEW(data), "ready");
+}
+
+static void
+resize_handler(	CelluloidVideoArea *video_area,
+		gint width,
+		gint height,
+		gpointer data )
+{
+	g_signal_emit_by_name(data, "video-area-resize", width, height);
 }
 
 static void
@@ -947,110 +1002,76 @@ render_handler(CelluloidVideoArea *area, gpointer data)
 }
 
 static gboolean
-draw_handler(GtkWidget *widget, cairo_t *cr, gpointer data)
+drop_handler(	GtkDropTarget *self,
+		GValue *value,
+		gdouble x,
+		gdouble y,
+		gpointer data )
 {
-	CelluloidView *view =
-		CELLULOID_VIEW(widget);
-	CelluloidMainWindow *wnd =
-		CELLULOID_MAIN_WINDOW(view);
-	CelluloidPlaylistWidget *playlist =
-		celluloid_main_window_get_playlist(wnd);
-	const GSignalMatchType match =
-		G_SIGNAL_MATCH_ID|G_SIGNAL_MATCH_DATA;
-	const guint signal_id =
-		g_signal_lookup("draw", CELLULOID_TYPE_VIEW);
+	CelluloidView *view = CELLULOID_VIEW(data);
+	GtkEventController *controller = GTK_EVENT_CONTROLLER(self);
+	GtkWidget *source = gtk_event_controller_get_widget(controller);
+	const gboolean append = CELLULOID_IS_PLAYLIST_WIDGET(source);
+	GListStore *files = NULL;
 
-	g_signal_handlers_disconnect_matched
-		(view, match, signal_id, 0, 0, NULL, NULL);
+	g_debug("Received drop event with value type %s", g_type_name(G_VALUE_TYPE(value)) );
 
-	if(celluloid_playlist_widget_empty(playlist))
+	if(G_VALUE_HOLDS_STRING(value))
 	{
-		CelluloidControlBox *control_box;
+		const gchar *string = g_value_get_string(value);
+		gchar **uris = g_uri_list_extract_uris(string);
 
-		control_box = celluloid_main_window_get_control_box(wnd);
-		g_object_set(control_box, "enabled", FALSE, NULL);
+		if(uris)
+		{
+			files = g_list_store_new(G_TYPE_FILE);
+
+			for(gint i = 0; uris[i]; i++)
+			{
+				GFile *file = g_file_new_for_uri(uris[i]);
+
+				g_list_store_append(files, file);
+				g_object_unref(file);
+			}
+
+			g_strfreev(uris);
+		}
+		else
+		{
+			g_warning("Failed to extract any URIs from dropped string");
+		}
 	}
-
-	g_signal_emit_by_name(view, "ready");
-
-	return FALSE;
-}
-
-static void
-drag_data_handler(	GtkWidget *widget,
-			GdkDragContext *context,
-			gint x,
-			gint y,
-			GtkSelectionData *sel_data,
-			guint info,
-			guint time,
-			gpointer data )
-{
-	CelluloidView *view = data;
-	gchar *type = gdk_atom_name(gtk_selection_data_get_target(sel_data));
-	const guchar *raw_data = gtk_selection_data_get_data(sel_data);
-	gchar **uri_list = gtk_selection_data_get_uris(sel_data);
-	GdkDragAction action = gdk_drag_context_get_selected_action(context);
-
-	// When shift is held, action will be set to GDK_ACTION_MOVE
-	gboolean append =	CELLULOID_IS_PLAYLIST_WIDGET(widget) ||
-				action == GDK_ACTION_MOVE;
-
-	if(g_strcmp0(type, "PLAYLIST_PATH") == 0)
+	else if(G_VALUE_HOLDS(value, GDK_TYPE_FILE_LIST))
 	{
-		GtkTreePath *path =	gtk_tree_path_new_from_string
-					((const gchar *)raw_data);
-		gint pos = gtk_tree_path_get_indices(path)[0];
+		const GSList *slist = g_value_get_boxed(value);
 
-		g_assert(path);
+		files = g_list_store_new(G_TYPE_FILE);
 
-		g_signal_emit_by_name(view, "playlist-item-activated", pos);
-
-		gtk_tree_path_free(path);
+		for(const GSList *cur = slist; cur; cur = cur->next)
+		{
+			g_list_store_append(files, G_FILE(cur->data));
+		}
 	}
 	else
 	{
-		if(!uri_list)
-		{
-			uri_list = g_malloc(2*sizeof(gchar *));
-			uri_list[0] = g_strdup((gchar *)raw_data);
-			uri_list[1] = NULL;
-		}
-
-		g_signal_emit_by_name(view, "file-open", uri_list, append);
+		g_error(	"Cannot handle drop event with value type %s",
+				g_type_name(G_VALUE_TYPE(value)) );
 	}
 
-	g_strfreev(uri_list);
-	g_free(type);
-}
-
-static gboolean
-window_state_handler(GtkWidget *widget, GdkEvent *event, gpointer data)
-{
-	CelluloidView *view = data;
-	GdkEventWindowState *state = (GdkEventWindowState *)event;
-
-	if(state->changed_mask&GDK_WINDOW_STATE_FULLSCREEN)
+	if(files)
 	{
-		view->fullscreen =	state->new_window_state&
-					GDK_WINDOW_STATE_FULLSCREEN;
-
-		g_object_notify(data, "fullscreen");
+		g_signal_emit_by_name(view, "file-open", files, append);
+		g_object_unref(files);
+	}
+	else
+	{
+		g_warning("Failed to open anything from drop event");
 	}
 
-	return FALSE;
-}
-
-static void
-screen_changed_handler(	GtkWidget *wnd,
-			GdkScreen *previous_screen,
-			gpointer data )
-{
-	update_display_fps(data);
+	return TRUE;
 }
 
 static gboolean
-delete_handler(GtkWidget *widget, GdkEvent *event, gpointer data)
+close_request_handler(GtkWidget *widget, gpointer data)
 {
 	if(!celluloid_main_window_get_fullscreen(CELLULOID_MAIN_WINDOW(widget)))
 	{
@@ -1127,6 +1148,14 @@ celluloid_view_class_init(CelluloidViewClass *klass)
 			G_PARAM_READWRITE );
 	g_object_class_install_property(object_class, PROP_PAUSE, pspec);
 
+	pspec = g_param_spec_boolean
+		(	"idle-active",
+			"Idle active",
+			"Whether or not the player is idle",
+			TRUE,
+			G_PARAM_READWRITE );
+	g_object_class_install_property(object_class, PROP_IDLE_ACTIVE, pspec);
+
 	pspec = g_param_spec_double
 		(	"volume",
 			"Volume",
@@ -1168,6 +1197,13 @@ celluloid_view_class_init(CelluloidViewClass *klass)
 	g_object_class_install_property(object_class, PROP_PLAYLIST_POS, pspec);
 
 	pspec = g_param_spec_pointer
+		(	"chapter-list",
+			"Chapter list",
+			"The list of chapters in the playing file",
+			G_PARAM_READWRITE );
+	g_object_class_install_property(object_class, PROP_CHAPTER_LIST, pspec);
+
+	pspec = g_param_spec_pointer
 		(	"track-list",
 			"Track list",
 			"The list of tracks in the playing file",
@@ -1205,39 +1241,13 @@ celluloid_view_class_init(CelluloidViewClass *klass)
 			G_PARAM_READWRITE );
 	g_object_class_install_property(object_class, PROP_SHUFFLE, pspec);
 
-	pspec = g_param_spec_boolean
-		(	"border",
-			"Border",
-			"Whether or not the main window should have decorations",
-			FALSE,
+	pspec = g_param_spec_string
+		(	"media-title",
+			"Media Title",
+			"The title of the media being played",
+			NULL,
 			G_PARAM_READWRITE );
-	g_object_class_install_property(object_class, PROP_BORDER, pspec);
-
-	pspec = g_param_spec_boolean
-		(	"fullscreen",
-			"Fullscreen",
-			"Whether or not the player is current in fullscreen mode",
-			FALSE,
-			G_PARAM_READWRITE );
-	g_object_class_install_property(object_class, PROP_FULLSCREEN, pspec);
-
-	pspec = g_param_spec_boolean
-		(	"maximized",
-			"Maximized",
-			"Whether or not the main window is maximized",
-			FALSE,
-			G_PARAM_READWRITE );
-	g_object_class_install_property(object_class, PROP_MAXIMIZED, pspec);
-
-	pspec = g_param_spec_double
-		(	"display-fps",
-			"Display FPS",
-			"The display rate of the monitor the window is on",
-			0.0,
-			G_MAXDOUBLE,
-			0.0,
-			G_PARAM_READABLE );
-	g_object_class_install_property(object_class, PROP_DISPLAY_FPS, pspec);
+	g_object_class_install_property(object_class, PROP_MEDIA_TITLE, pspec);
 
 	pspec = g_param_spec_boolean
 		(	"searching",
@@ -1288,7 +1298,7 @@ celluloid_view_class_init(CelluloidViewClass *klass)
 			g_cclosure_marshal_VOID__VOID,
 			G_TYPE_NONE,
 			0 );
-	g_signal_new(	"preferences-updated",
+	g_signal_new(	"mpv-reset-request",
 			G_TYPE_FROM_CLASS(klass),
 			G_SIGNAL_RUN_FIRST,
 			0,
@@ -1388,22 +1398,22 @@ celluloid_view_init(CelluloidView *view)
 	view->has_dialog = FALSE;
 	view->playlist_count = 0;
 	view->pause = FALSE;
+	view->idle_active = FALSE;
 	view->volume = 0.0;
 	view->volume_max = 100.0;
 	view->duration = 0.0;
 	view->playlist_pos = 0;
+	view->chapter_list = NULL;
+	view->track_list = NULL;
 	view->disc_list = NULL;
 	view->skip_enabled = FALSE;
 	view->loop = FALSE;
 	view->shuffle = FALSE;
-	view->border = FALSE;
-	view->fullscreen = FALSE;
-	view->maximized = FALSE;
+	view->media_title = NULL;
 	view->display_fps = 0;
 	view->searching = FALSE;
 
 	g_signal_connect(view, "realize", G_CALLBACK(realize_handler), NULL);
-	g_signal_connect_after(view, "draw", G_CALLBACK(draw_handler), NULL);
 }
 
 CelluloidView *
@@ -1464,7 +1474,10 @@ celluloid_view_show_open_dialog(	CelluloidView *view,
 		action = GTK_FILE_CHOOSER_ACTION_OPEN;
 	}
 
-	chooser = celluloid_file_chooser_new(title, GTK_WINDOW(view), action);
+	chooser =
+		celluloid_file_chooser_new
+		(title, GTK_WINDOW(view), action, TRUE);
+
 	args = g_ptr_array_new();
 	append_buf = g_malloc(sizeof(gboolean));
 	*append_buf = append;
@@ -1500,7 +1513,6 @@ celluloid_view_show_open_location_dialog(CelluloidView *view, gboolean append)
 			_("Open Location") );
 	args = g_ptr_array_sized_new(2);
 	append_buf = g_malloc(sizeof(gboolean));
-
 	*append_buf = append;
 
 	g_ptr_array_add(args, view);
@@ -1512,7 +1524,7 @@ celluloid_view_show_open_location_dialog(CelluloidView *view, gboolean append)
 			G_CALLBACK(open_location_dialog_response_handler),
 			args );
 
-	gtk_widget_show_all(dlg);
+	gtk_widget_set_visible(dlg, TRUE);
 }
 
 void
@@ -1536,45 +1548,24 @@ celluloid_view_show_open_subtitle_track_dialog(CelluloidView *view)
 void
 celluloid_view_show_save_playlist_dialog(CelluloidView *view)
 {
-	GFile *dest_file;
 	CelluloidFileChooser *file_chooser;
 	GtkFileChooser *gtk_chooser;
-	GError *error;
 
-	dest_file = NULL;
 	file_chooser =	celluloid_file_chooser_new
 			(	_("Save Playlist"),
 				GTK_WINDOW(view),
-				GTK_FILE_CHOOSER_ACTION_SAVE );
+				GTK_FILE_CHOOSER_ACTION_SAVE,
+				TRUE );
 	gtk_chooser = GTK_FILE_CHOOSER(file_chooser);
-	error = NULL;
 
 	gtk_file_chooser_set_current_name(gtk_chooser, "playlist.m3u");
 
-	if(celluloid_file_chooser_run(file_chooser) == GTK_RESPONSE_ACCEPT)
-	{
-		/* There should be only one file selected. */
-		dest_file = gtk_file_chooser_get_file(gtk_chooser);
-	}
+	g_signal_connect(	file_chooser,
+				"response",
+				G_CALLBACK(save_playlist_response_handler),
+				view );
 
-	celluloid_file_chooser_destroy(file_chooser);
-
-	if(dest_file)
-	{
-		save_playlist(view, dest_file, &error);
-		g_object_unref(dest_file);
-	}
-
-	if(error)
-	{
-		show_message_dialog(	view,
-					GTK_MESSAGE_ERROR,
-					_("Error"),
-					NULL,
-					error->message );
-
-		g_error_free(error);
-	}
+	gtk_native_dialog_show(GTK_NATIVE_DIALOG(file_chooser));
 }
 
 void
@@ -1583,11 +1574,11 @@ celluloid_view_show_preferences_dialog(CelluloidView *view)
 	GtkWidget *dialog = celluloid_preferences_dialog_new(GTK_WINDOW(view));
 
 	g_signal_connect_after(	dialog,
-				"response",
-				G_CALLBACK(preferences_dialog_response_handler),
+				"mpv-reset-request",
+				G_CALLBACK(mpv_reset_request_handler),
 				view );
 
-	gtk_widget_show_all(dialog);
+	gtk_widget_set_visible(dialog, TRUE);
 }
 
 void
@@ -1595,28 +1586,32 @@ celluloid_view_show_shortcuts_dialog(CelluloidView *view)
 {
 	GtkWidget *wnd = celluloid_shortcuts_window_new(GTK_WINDOW(view));
 
-	gtk_widget_show_all(wnd);
+	gtk_widget_set_visible(wnd, TRUE);
 }
 
 void
-celluloid_view_show_about_dialog(CelluloidView *view)
+celluloid_view_show_about_window (CelluloidView *view)
 {
 	const gchar *const authors[] = AUTHORS;
 
-	gtk_show_about_dialog(	GTK_WINDOW(view),
-				"logo-icon-name",
+	adw_show_about_window(	GTK_WINDOW(view),
+				"application-icon",
 				ICON_NAME,
+				"application-name",
+				g_get_application_name(),
+				"developer-name",
+				"The Celluloid Developers",
 				"version",
 				VERSION,
-				"comments",
-				_("A GTK frontend for MPV"),
 				"website",
-				"https://github.com/celluloid-player/celluloid",
+				"https://celluloid-player.github.io/",
+				"issue-url",
+				"https://celluloid-player.github.io/bug-reports.html",
 				"license-type",
 				GTK_LICENSE_GPL_3_0,
 				"copyright",
-				"\u00A9 2014-2020 The Celluloid authors",
-				"authors",
+				"\u00A9 2014-2023 The Celluloid authors",
+				"developers",
 				authors,
 				"translator-credits",
 				_("translator-credits"),
@@ -1624,13 +1619,14 @@ celluloid_view_show_about_dialog(CelluloidView *view)
 }
 
 void
-celluloid_view_show_message_dialog(	CelluloidView *view,
-					GtkMessageType type,
-					const gchar *title,
-					const gchar *prefix,
-					const gchar *msg )
+celluloid_view_show_message_toast(CelluloidView *view, const gchar *msg)
 {
-	show_message_dialog(view, type, title, prefix, msg);
+	CelluloidMainWindow *wnd =
+		CELLULOID_MAIN_WINDOW(view);
+	CelluloidVideoArea *video_area =
+		celluloid_main_window_get_video_area(wnd);
+
+	celluloid_video_area_show_toast_message(video_area, msg);
 }
 
 void
@@ -1674,21 +1670,12 @@ celluloid_view_make_gl_context_current(CelluloidView *view)
 	gtk_gl_area_make_current(gl_area);
 }
 
-void
-celluloid_view_set_use_opengl_cb(CelluloidView *view, gboolean use_opengl_cb)
-{
-	CelluloidMainWindow *wnd = CELLULOID_MAIN_WINDOW(view);
-	CelluloidVideoArea *area = celluloid_main_window_get_video_area(wnd);
-
-	celluloid_video_area_set_use_opengl(area, use_opengl_cb);
-}
-
 gint
 celluloid_view_get_scale_factor(CelluloidView *view)
 {
-	GdkWindow *gdk_window = gtk_widget_get_window(GTK_WIDGET(view));
+	GdkSurface *surface = gtk_widget_get_surface(view);
 
-	return gdk_window_get_scale_factor(gdk_window);
+	return gdk_surface_get_scale_factor(surface);
 }
 
 void
@@ -1713,43 +1700,17 @@ celluloid_view_move(	CelluloidView *view,
 			GValue *x,
 			GValue *y )
 {
-	GtkWindow *window = GTK_WINDOW(view);
-	GdkWindow *gdk_window = gtk_widget_get_window(GTK_WIDGET(window));
+#ifdef GDK_WINDOWING_WAYLAND
 	GdkDisplay *display = gdk_display_get_default();
-	GdkMonitor *monitor =	gdk_display_get_monitor_at_window
-				(display, gdk_window);
-	GdkRectangle monitor_geom = {0};
-	gint64 x_pos = -1;
-	gint64 y_pos = -1;
-	gint window_width = 0;
-	gint window_height = 0;
-	gint space_x = 0;
-	gint space_y = 0;
 
-	gtk_window_get_size(window, &window_width, &window_height);
-	gdk_monitor_get_geometry(monitor, &monitor_geom);
-	space_x = monitor_geom.width-window_width;
-	space_y = monitor_geom.height-window_height;
+	if (GDK_IS_WAYLAND_DISPLAY(display))
+	{
+		g_warning("%s: Not supported on Wayland", __func__);
+		return;
+	}
+#endif
 
-	if(G_VALUE_HOLDS_DOUBLE(x))
-	{
-		x_pos = (gint64)(g_value_get_double(x)*space_x);
-	}
-	else
-	{
-		x_pos = flip_x?space_x-g_value_get_int64(x):g_value_get_int64(x);
-	}
-
-	if(G_VALUE_HOLDS_DOUBLE(y))
-	{
-		y_pos = (gint64)(g_value_get_double(y)*space_y);
-	}
-	else
-	{
-		y_pos = flip_y?space_y-g_value_get_int64(y):g_value_get_int64(y);
-	}
-
-	gtk_window_move(window, (gint)x_pos, (gint)y_pos);
+	g_warning("%s: Not implemented", __func__);
 }
 
 void
@@ -1762,9 +1723,7 @@ celluloid_view_resize_video_area(CelluloidView *view, gint width, gint height)
 void
 celluloid_view_set_fullscreen(CelluloidView *view, gboolean fullscreen)
 {
-	g_object_set(view, "fullscreen", fullscreen, NULL);
-	celluloid_main_window_set_fullscreen
-		(CELLULOID_MAIN_WINDOW(view), fullscreen);
+	g_object_set(view, "fullscreened", fullscreen, NULL);
 }
 
 void
@@ -1789,7 +1748,7 @@ celluloid_view_update_playlist(CelluloidView *view, GPtrArray *playlist)
 void
 celluloid_view_set_playlist_pos(CelluloidView *view, gint64 pos)
 {
-	g_object_set(view, "playlist-pos", pos, NULL);
+	g_object_set(view, "playlist-pos", (gint)pos, NULL);
 }
 
 void

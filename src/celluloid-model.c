@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2021 gnome-mpv
+ * Copyright (c) 2017-2022 gnome-mpv
  *
  * This file is part of Celluloid.
  *
@@ -21,7 +21,7 @@
 
 #include "celluloid-model.h"
 #include "celluloid-marshal.h"
-#include "celluloid-mpv-wrapper.h"
+#include "celluloid-mpv.h"
 #include "celluloid-option-parser.h"
 #include "celluloid-def.h"
 
@@ -34,7 +34,6 @@ enum
 	PROP_CHAPTERS,
 	PROP_CORE_IDLE,
 	PROP_IDLE_ACTIVE,
-	PROP_BORDER,
 	PROP_FULLSCREEN,
 	PROP_PAUSE,
 	PROP_LOOP_FILE,
@@ -67,7 +66,6 @@ struct _CelluloidModel
 	gint64 chapters;
 	gboolean core_idle;
 	gboolean idle_active;
-	gboolean border;
 	gboolean fullscreen;
 	gboolean pause;
 	gchar *loop_file;
@@ -228,15 +226,7 @@ set_property(	GObject *object,
 
 		case PROP_IDLE_ACTIVE:
 		self->idle_active = g_value_get_boolean(value);
-
-		if(self->idle_active)
-		{
-			g_object_notify(object, "playlist-pos");
-		}
-		break;
-
-		case PROP_BORDER:
-		self->border = g_value_get_boolean(value);
+		g_object_notify(object, "playlist-pos");
 		break;
 
 		case PROP_FULLSCREEN:
@@ -365,10 +355,6 @@ get_property(	GObject *object,
 		g_value_set_boolean(value, self->idle_active);
 		break;
 
-		case PROP_BORDER:
-		g_value_set_boolean(value, self->border);
-		break;
-
 		case PROP_FULLSCREEN:
 		g_value_set_boolean(value, self->fullscreen);
 		break;
@@ -402,7 +388,12 @@ get_property(	GObject *object,
 		break;
 
 		case PROP_PLAYLIST_POS:
-		g_value_set_int64(value, self->idle_active?0:self->playlist_pos);
+		{
+			const gint64 playlist_pos =
+				self->idle_active ? -1 : self->playlist_pos;
+
+			g_value_set_int64(value, playlist_pos);
+		}
 		break;
 
 		case PROP_SPEED:
@@ -498,13 +489,6 @@ set_mpv_property(	GObject *object,
 						&self->sid );
 		break;
 
-		case PROP_BORDER:
-		celluloid_mpv_set_property(	mpv,
-						"border",
-						MPV_FORMAT_FLAG,
-						&self->border );
-		break;
-
 		case PROP_FULLSCREEN:
 		celluloid_mpv_set_property(	mpv,
 						"fullscreen",
@@ -531,13 +515,6 @@ set_mpv_property(	GObject *object,
 						"loop-playlist",
 						MPV_FORMAT_STRING,
 						&self->loop_playlist );
-		break;
-
-		case PROP_MEDIA_TITLE:
-		celluloid_mpv_set_property(	mpv,
-						"media-title",
-						MPV_FORMAT_INT64,
-						&self->media_title );
 		break;
 
 		case PROP_PLAYLIST_POS:
@@ -707,6 +684,7 @@ mpv_prop_change_handler(	CelluloidMpv *mpv,
 {
 	if(	g_strcmp0(name, "playlist") != 0 &&
 		g_strcmp0(name, "metadata") != 0 &&
+		g_strcmp0(name, "chapter-list") != 0 &&
 		g_strcmp0(name, "track-list") != 0 )
 	{
 		GObjectClass *klass;
@@ -748,7 +726,6 @@ celluloid_model_class_init(CelluloidModelClass *klass)
 			{"chapters", PROP_CHAPTERS, G_TYPE_INT64},
 			{"core-idle", PROP_CORE_IDLE, G_TYPE_BOOLEAN},
 			{"idle-active", PROP_IDLE_ACTIVE, G_TYPE_BOOLEAN},
-			{"border", PROP_BORDER, G_TYPE_BOOLEAN},
 			{"fullscreen", PROP_FULLSCREEN, G_TYPE_BOOLEAN},
 			{"pause", PROP_PAUSE, G_TYPE_BOOLEAN},
 			{"loop-file", PROP_LOOP_FILE, G_TYPE_STRING},
@@ -762,7 +739,6 @@ celluloid_model_class_init(CelluloidModelClass *klass)
 			{"volume-max", PROP_VOLUME_MAX, G_TYPE_DOUBLE},
 			{"window-maximized", PROP_WINDOW_MAXIMIZED, G_TYPE_BOOLEAN},
 			{"window-scale", PROP_WINDOW_SCALE, G_TYPE_DOUBLE},
-			{"display-fps", PROP_DISPLAY_FPS, G_TYPE_DOUBLE},
 			{NULL, PROP_INVALID, 0} };
 
 	GObjectClass *obj_class = G_OBJECT_CLASS(klass);
@@ -792,6 +768,15 @@ celluloid_model_class_init(CelluloidModelClass *klass)
 			G_PARAM_READWRITE );
 	g_object_class_install_property(obj_class, PROP_SHUFFLE, pspec);
 
+	g_signal_new(	"playlist-replaced",
+			G_TYPE_FROM_CLASS(klass),
+			G_SIGNAL_RUN_FIRST,
+			0,
+			NULL,
+			NULL,
+			g_cclosure_marshal_VOID__VOID,
+			G_TYPE_NONE,
+			0 );
 	g_signal_new(	"playback-restart",
 			G_TYPE_FROM_CLASS(klass),
 			G_SIGNAL_RUN_FIRST,
@@ -826,7 +811,6 @@ celluloid_model_init(CelluloidModel *model)
 	model->chapters = 0;
 	model->core_idle = FALSE;
 	model->idle_active = FALSE;
-	model->border = FALSE;
 	model->fullscreen = FALSE;
 	model->pause = TRUE;
 	model->loop_file = NULL;
@@ -1159,6 +1143,7 @@ celluloid_model_load_file(	CelluloidModel *model,
 	 */
 	if(!append || model->playlist_count == 0)
 	{
+		g_signal_emit_by_name(model, "playlist-replaced");
 		celluloid_model_play(model);
 	}
 

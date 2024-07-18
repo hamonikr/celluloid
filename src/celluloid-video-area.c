@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2021 gnome-mpv
+ * Copyright (c) 2016-2024 gnome-mpv
  *
  * This file is part of Celluloid.
  *
@@ -19,46 +19,55 @@
 
 #include "celluloid-video-area.h"
 #include "celluloid-control-box.h"
+#include "celluloid-marshal.h"
 #include "celluloid-common.h"
 #include "celluloid-def.h"
 
+#include <adwaita.h>
 #include <gtk/gtk.h>
 #include <gdk/gdk.h>
+#include <glib/gi18n.h>
 #include <glib-object.h>
 #include <math.h>
 
 #ifdef GDK_WINDOWING_X11
-#include <gdk/gdkx.h>
+#include <gdk/x11/gdkx.h>
 #endif
 
 enum
 {
 	PROP_0,
-	PROP_TITLE,
+	PROP_FULLSCREENED,
 	N_PROPERTIES
 };
 
 struct _CelluloidVideoArea
 {
-	GtkOverlay parent_instance;
+	GtkBox parent_instance;
+	GtkWidget *toast_overlay;
+	GtkWidget *overlay;
 	GtkWidget *stack;
-	GtkWidget *draw_area;
 	GtkWidget *gl_area;
+	GtkWidget *initial_page;
 	GtkWidget *control_box;
 	GtkWidget *header_bar;
 	GtkWidget *control_box_revealer;
 	GtkWidget *header_bar_revealer;
+	GtkEventController *area_motion_controller;
+	CelluloidVideoAreaStatus status;
+	gint compact_threshold;
 	guint32 last_motion_time;
 	gdouble last_motion_x;
 	gdouble last_motion_y;
 	guint timeout_tag;
-	gboolean fullscreen;
+	gboolean fullscreened;
 	gboolean fs_control_hover;
+	gboolean use_floating_header_bar;
 };
 
 struct _CelluloidVideoAreaClass
 {
-	GtkOverlayClass parent_class;
+	GtkBoxClass parent_class;
 };
 
 static void
@@ -73,24 +82,47 @@ get_property(	GObject *object,
 		GValue *value,
 		GParamSpec *pspec );
 
-static
-void destroy(GtkWidget *widget);
+static gboolean
+update_compact_mode(GtkWidget *widget);
 
-static
-void set_cursor_visible(CelluloidVideoArea *area, gboolean visible);
+static void
+set_fullscreen_state(CelluloidVideoArea *area, gboolean fullscreen);
 
-static
-gboolean timeout_handler(gpointer data);
+static void
+set_cursor_visible(CelluloidVideoArea *area, gboolean visible);
 
-static
-gboolean motion_notify_event(GtkWidget *widget, GdkEventMotion *event);
+static void
+reveal_controls(CelluloidVideoArea *area);
+
+static void
+destroy_handler(GtkWidget *widget, gpointer data);
 
 static gboolean
-fs_control_crossing_handler(	GtkWidget *widget,
-				GdkEventCrossing *event,
-				gpointer data );
+timeout_handler(gpointer data);
 
-G_DEFINE_TYPE(CelluloidVideoArea, celluloid_video_area, GTK_TYPE_OVERLAY)
+static void
+motion_handler(	GtkEventControllerMotion *controller,
+		gdouble x,
+		gdouble y,
+		gpointer data );
+
+static void
+pressed_handler(	GtkGestureClick *self,
+			gint n_press,
+			gdouble x,
+			gdouble y,
+			gpointer data );
+
+static void
+enter_handler(	GtkEventControllerMotion *controller,
+		gdouble x,
+		gdouble y,
+		gpointer data );
+
+static void
+leave_handler(GtkEventControllerMotion *controller, gpointer data);
+
+G_DEFINE_TYPE(CelluloidVideoArea, celluloid_video_area, GTK_TYPE_BOX)
 
 static void
 set_property(	GObject *object,
@@ -102,10 +134,9 @@ set_property(	GObject *object,
 
 	switch(property_id)
 	{
-		case PROP_TITLE:
-		g_object_set_property(	G_OBJECT(self->header_bar),
-					pspec->name,
-					value );
+		case PROP_FULLSCREENED:
+		self->fullscreened = g_value_get_boolean(value);
+		set_fullscreen_state(self, self->fullscreened);
 		break;
 
 		default:
@@ -124,10 +155,8 @@ get_property(	GObject *object,
 
 	switch(property_id)
 	{
-		case PROP_TITLE:
-		g_object_get_property(	G_OBJECT(self->header_bar),
-					pspec->name,
-					value );
+		case PROP_FULLSCREENED:
+		g_value_set_boolean(value, self->fullscreened);
 		break;
 
 		default:
@@ -136,8 +165,86 @@ get_property(	GObject *object,
 	}
 }
 
+static gboolean
+update_compact_mode(GtkWidget *widget)
+{
+	CelluloidVideoArea *area = CELLULOID_VIDEO_AREA(widget);
+
+	if(area->compact_threshold < 0)
+	{
+		// We need to temporarily show the control box while measuring
+		// so that it's taken into account.
+		GtkWidget *revealer = area->control_box_revealer;
+		const gboolean was_visible = gtk_widget_get_visible(revealer);
+
+		gtk_widget_set_visible(revealer, TRUE);
+		gtk_widget_measure
+			(	widget,
+				GTK_ORIENTATION_HORIZONTAL,
+				-1,
+				&area->compact_threshold,
+				NULL,
+				NULL,
+				NULL );
+		gtk_widget_set_visible(revealer, was_visible);
+
+		g_assert(area->compact_threshold > -1);
+		area->compact_threshold += COMPACT_THRESHOLD_OFFSET;
+	}
+
+	const gint width = gtk_widget_get_allocated_width(widget);
+	const gboolean compact = width <= area->compact_threshold;
+	gboolean was_compact = FALSE;
+
+	g_object_get(area->control_box, "compact", &was_compact, NULL);
+
+	if(compact != was_compact)
+	{
+		celluloid_video_area_set_reveal_control_box(area, TRUE);
+		g_object_set(area->control_box, "compact", compact, NULL);
+	}
+
+	return G_SOURCE_REMOVE;
+}
+
 static void
-destroy(GtkWidget *widget)
+set_fullscreen_state(CelluloidVideoArea *area, gboolean fullscreen)
+{
+	area->fs_control_hover = FALSE;
+
+	gtk_widget_set_visible(area->header_bar_revealer, FALSE);
+	set_cursor_visible(area, !fullscreen);
+
+	gtk_revealer_set_reveal_child
+		(GTK_REVEALER(area->control_box_revealer), FALSE);
+	gtk_revealer_set_reveal_child
+		(GTK_REVEALER(area->header_bar_revealer), FALSE);
+}
+
+static void
+reveal_controls(CelluloidVideoArea *area)
+{
+	GdkCursor *cursor = gdk_cursor_new_from_name("default", NULL);
+	GdkSurface *surface = gtk_widget_get_surface(GTK_WIDGET(area));
+
+	gdk_surface_set_cursor(surface, cursor);
+
+	gtk_revealer_set_reveal_child
+		(	GTK_REVEALER(area->control_box_revealer),
+			TRUE );
+	gtk_revealer_set_reveal_child
+		(	GTK_REVEALER(area->header_bar_revealer),
+			area->use_floating_header_bar );
+
+	g_source_clear(&area->timeout_tag);
+	area->timeout_tag =	g_timeout_add_seconds
+				(	FS_CONTROL_HIDE_DELAY,
+					timeout_handler,
+					area );
+}
+
+static void
+destroy_handler(GtkWidget *widget, gpointer data)
 {
 	g_source_clear(&CELLULOID_VIDEO_AREA(widget)->timeout_tag);
 }
@@ -145,23 +252,32 @@ destroy(GtkWidget *widget)
 static void
 set_cursor_visible(CelluloidVideoArea *area, gboolean visible)
 {
-	GdkWindow *window;
-	GdkCursor *cursor;
+	GdkSurface *surface = gtk_widget_get_surface(area);
+	GdkCursor *cursor = NULL;
 
-	window = gtk_widget_get_window(GTK_WIDGET(area));
+	const gboolean hovering =
+		gtk_event_controller_motion_contains_pointer
+		(GTK_EVENT_CONTROLLER_MOTION(area->area_motion_controller));
 
-	if(visible)
+	if(visible || !hovering)
 	{
-		cursor =	gdk_cursor_new_from_name
-				(gdk_display_get_default(), "default");
+		cursor = gdk_cursor_new_from_name("default", NULL);
 	}
 	else
 	{
-		cursor =	gdk_cursor_new_for_display
-				(gdk_display_get_default(), GDK_BLANK_CURSOR);
+               GdkPixbuf *pixbuf =
+                       gdk_pixbuf_new
+                       (GDK_COLORSPACE_RGB, TRUE, 8, 1, 1);
+               gdk_pixbuf_fill(pixbuf, 0x00000000);
+
+               GdkTexture *texture = gdk_texture_new_for_pixbuf(pixbuf);
+               cursor = gdk_cursor_new_from_texture(texture, 0, 0, NULL);
+
+               g_object_unref(texture);
+               g_object_unref(pixbuf);
 	}
 
-	gdk_window_set_cursor(window, cursor);
+	gdk_surface_set_cursor(surface, cursor);
 	g_object_unref(cursor);
 }
 
@@ -197,7 +313,7 @@ timeout_handler(gpointer data)
 		gtk_revealer_set_reveal_child
 			(GTK_REVEALER(area->header_bar_revealer), FALSE);
 
-		set_cursor_visible(area, !(always_autohide || area->fullscreen));
+		set_cursor_visible(area, !(always_autohide || area->fullscreened));
 		area->timeout_tag = 0;
 
 		g_object_unref(settings);
@@ -214,11 +330,15 @@ timeout_handler(gpointer data)
 	return (area->timeout_tag != 0);
 }
 
-static gboolean
-motion_notify_event(GtkWidget *widget, GdkEventMotion *event)
+static void
+motion_handler(	GtkEventControllerMotion *controller,
+		gdouble x,
+		gdouble y,
+		gpointer data )
 {
 	GSettings *settings = g_settings_new(CONFIG_ROOT);
-	CelluloidVideoArea *area = CELLULOID_VIDEO_AREA(widget);
+	GtkWidget *widget = GTK_WIDGET(data);
+	CelluloidVideoArea *area = CELLULOID_VIDEO_AREA(data);
 	const gint height = gtk_widget_get_allocated_height(widget);
 
 	const gdouble unhide_speed =
@@ -226,44 +346,54 @@ motion_notify_event(GtkWidget *widget, GdkEventMotion *event)
 	const gdouble dead_zone =
 		g_settings_get_double(settings, "controls-dead-zone-size");
 
-	const gdouble dist = sqrt(	pow(event->x - area->last_motion_x, 2) +
-					pow(event->y - area->last_motion_y, 2) );
-	const gdouble speed = dist / (event->time - area->last_motion_time);
+	const guint32 time =	gtk_event_controller_get_current_event_time
+				(GTK_EVENT_CONTROLLER(controller));
+	const gdouble dist = sqrt(	pow(x - area->last_motion_x, 2) +
+					pow(y - area->last_motion_y, 2) );
+	const gdouble speed = dist / (time - area->last_motion_time);
 
-	area->last_motion_time = event->time;
-	area->last_motion_x = event->x;
-	area->last_motion_y = event->y;
+	area->last_motion_time = time;
+	area->last_motion_x = x;
+	area->last_motion_y = y;
 
-	if(speed >= unhide_speed)
+	if(	speed >= unhide_speed &&
+		area->control_box &&
+		ABS((2 * y - height) / height) > dead_zone )
 	{
-		GdkCursor *cursor =	gdk_cursor_new_from_name
-					(	gdk_display_get_default(),
-						"default" );
-
-		gdk_window_set_cursor(gtk_widget_get_window(widget), cursor);
-
-		if(	area->control_box &&
-			ABS((2 * event->y - height) / height) > dead_zone )
-		{
-			gtk_revealer_set_reveal_child
-				(	GTK_REVEALER(area->control_box_revealer),
-					TRUE );
-			gtk_revealer_set_reveal_child
-				(	GTK_REVEALER(area->header_bar_revealer),
-					area->fullscreen );
-		}
-
-		g_source_clear(&area->timeout_tag);
-		area->timeout_tag =	g_timeout_add_seconds
-					(	FS_CONTROL_HIDE_DELAY,
-						timeout_handler,
-						area );
+		reveal_controls(area);
 	}
 
 	g_object_unref(settings);
+}
 
-	return	GTK_WIDGET_CLASS(celluloid_video_area_parent_class)
-			->motion_notify_event(widget, event);
+static void
+pressed_handler(	GtkGestureClick *self,
+			gint n_press,
+			gdouble x,
+			gdouble y,
+			gpointer data )
+{
+	CelluloidVideoArea *area = CELLULOID_VIDEO_AREA(data);
+	GSettings *settings = g_settings_new(CONFIG_ROOT);
+
+	const gboolean hovering =
+		area->fs_control_hover;
+	const gboolean draggable =
+		g_settings_get_boolean(settings, "draggable-video-area-enable");
+
+	reveal_controls(area);
+
+	if(draggable && !hovering)
+	{
+		GdkSurface *surface = gtk_widget_get_surface(GTK_WIDGET(data));
+		GdkToplevel *toplevel = GDK_TOPLEVEL(surface);
+		GdkDevice *device = gtk_gesture_get_device(GTK_GESTURE(self));
+		GtkGestureSingle *single = GTK_GESTURE_SINGLE(self);
+		gint button = (gint)gtk_gesture_single_get_button(single);
+
+		gdk_toplevel_begin_move
+			(toplevel, device, button, x, y, GDK_CURRENT_TIME);
+	}
 }
 
 static gboolean
@@ -272,6 +402,13 @@ render_handler(GtkGLArea *gl_area, GdkGLContext *context, gpointer data)
 	g_signal_emit_by_name(data, "render");
 
 	return TRUE;
+}
+
+static void
+resize_handler(GtkWidget *widget, gint width, gint height, gpointer data)
+{
+	g_idle_add((GSourceFunc)update_compact_mode, data);
+	g_signal_emit_by_name(data, "resize", width, height);
 }
 
 static void
@@ -305,19 +442,23 @@ reveal_notify_handler(GObject *gobject, GParamSpec *pspec, gpointer data)
 			NULL );
 
 	gtk_widget_set_visible(	GTK_WIDGET(area->header_bar_revealer),
-				area->fullscreen &&
+				area->use_floating_header_bar &&
 				(reveal_child || child_revealed) );
 }
 
-static gboolean
-fs_control_crossing_handler(	GtkWidget *widget,
-				GdkEventCrossing *event,
-				gpointer data )
+static void
+enter_handler(	GtkEventControllerMotion *controller,
+		gdouble x,
+		gdouble y,
+		gpointer data )
 {
-	CELLULOID_VIDEO_AREA(data)->fs_control_hover =
-		(event->type == GDK_ENTER_NOTIFY);
+	CELLULOID_VIDEO_AREA(data)->fs_control_hover = TRUE;
+}
 
-	return FALSE;
+static void
+leave_handler(GtkEventControllerMotion *controller, gpointer data)
+{
+	CELLULOID_VIDEO_AREA(data)->fs_control_hover = FALSE;
 }
 
 static void
@@ -329,10 +470,16 @@ celluloid_video_area_class_init(CelluloidVideoAreaClass *klass)
 
 	obj_class->set_property = set_property;
 	obj_class->get_property = get_property;
-	wgt_class->destroy = destroy;
-	wgt_class->motion_notify_event = motion_notify_event;
 
 	gtk_widget_class_set_css_name(wgt_class, "celluloid-video-area");
+
+	pspec = g_param_spec_boolean
+		(	"fullscreened",
+			"Fullscreened",
+			"Whether the video area is in fullscreen configuration",
+			FALSE,
+			G_PARAM_READWRITE );
+	g_object_class_install_property(obj_class, PROP_FULLSCREENED, pspec);
 
 	g_signal_new(	"render",
 			G_TYPE_FROM_CLASS(klass),
@@ -343,75 +490,128 @@ celluloid_video_area_class_init(CelluloidVideoAreaClass *klass)
 			g_cclosure_marshal_VOID__VOID,
 			G_TYPE_NONE,
 			0 );
-
-	pspec = g_param_spec_string
-		(	"title",
-			"Title",
-			"The title of the header bar",
+	g_signal_new(	"resize",
+			G_TYPE_FROM_CLASS(klass),
+			G_SIGNAL_RUN_FIRST,
+			0,
 			NULL,
-			G_PARAM_READWRITE );
-	g_object_class_install_property(obj_class, PROP_TITLE, pspec);
+			NULL,
+			g_cclosure_gen_marshal_VOID__INT_INT,
+			G_TYPE_NONE,
+			2,
+			G_TYPE_INT,
+			G_TYPE_INT );
 }
 
 static void
 celluloid_video_area_init(CelluloidVideoArea *area)
 {
-	GtkTargetEntry targets[] = DND_TARGETS;
-
-	/* GDK_BUTTON_RELEASE_MASK is needed so that GtkMenuButtons can
-	 * hide their menus when vid_area is clicked.
-	 */
-	const gint extra_events =	GDK_BUTTON_PRESS_MASK|
-					GDK_BUTTON_RELEASE_MASK|
-					GDK_POINTER_MOTION_MASK|
-					GDK_SMOOTH_SCROLL_MASK|
-					GDK_SCROLL_MASK;
-
+	area->toast_overlay = adw_toast_overlay_new();
+	area->overlay = gtk_overlay_new();
 	area->stack = gtk_stack_new();
-	area->draw_area = gtk_drawing_area_new();
 	area->gl_area = gtk_gl_area_new();
+	area->initial_page = adw_status_page_new();
 	area->control_box = celluloid_control_box_new();
 	area->header_bar = celluloid_header_bar_new();
 	area->control_box_revealer = gtk_revealer_new();
 	area->header_bar_revealer = gtk_revealer_new();
+	area->area_motion_controller = gtk_event_controller_motion_new();
+	area->status = CELLULOID_VIDEO_AREA_STATUS_LOADING;
+	area->compact_threshold = -1;
 	area->last_motion_time = 0;
 	area->last_motion_x = -1;
 	area->last_motion_y = -1;
 	area->timeout_tag = 0;
-	area->fullscreen = FALSE;
+	area->fullscreened = FALSE;
 	area->fs_control_hover = FALSE;
-
-	gtk_drag_dest_set(	GTK_WIDGET(area),
-				GTK_DEST_DEFAULT_ALL,
-				targets,
-				G_N_ELEMENTS(targets),
-				GDK_ACTION_COPY );
-
-	gtk_widget_add_events(area->draw_area, extra_events);
-	gtk_widget_add_events(area->gl_area, extra_events);
+	area->use_floating_header_bar = FALSE;
 
 	gtk_widget_set_valign(area->control_box_revealer, GTK_ALIGN_END);
 	gtk_revealer_set_transition_type
 		(GTK_REVEALER(area->control_box_revealer),
-		GTK_REVEALER_TRANSITION_TYPE_SLIDE_UP);
+		GTK_REVEALER_TRANSITION_TYPE_CROSSFADE);
 	gtk_revealer_set_reveal_child
 		(GTK_REVEALER(area->control_box_revealer), FALSE);
 
 	gtk_widget_set_valign(area->header_bar_revealer, GTK_ALIGN_START);
+	gtk_revealer_set_transition_type
+		(GTK_REVEALER(area->header_bar_revealer),
+		GTK_REVEALER_TRANSITION_TYPE_CROSSFADE);
 	gtk_revealer_set_reveal_child
 		(GTK_REVEALER(area->header_bar_revealer), FALSE);
 
-	gtk_widget_show_all(area->control_box);
-	gtk_widget_hide(area->control_box_revealer);
-	gtk_widget_set_no_show_all(area->control_box_revealer, TRUE);
+	gtk_widget_set_visible(area->control_box, TRUE);
+	gtk_widget_set_visible(area->control_box_revealer, FALSE);
 
-	gtk_widget_show_all(area->header_bar);
-	gtk_widget_hide(area->header_bar_revealer);
-	gtk_widget_set_no_show_all(area->header_bar_revealer, TRUE);
+	gtk_widget_set_visible(area->header_bar, TRUE);
+	gtk_widget_set_visible(area->header_bar_revealer, FALSE);
 
+	g_object_bind_property(	area, "fullscreened",
+				area->control_box, "fullscreened",
+				G_BINDING_DEFAULT | G_BINDING_SYNC_CREATE );
+	g_object_bind_property(	area, "fullscreened",
+				area->header_bar, "fullscreened",
+				G_BINDING_DEFAULT | G_BINDING_SYNC_CREATE );
+
+	GtkEventController *area_motion_controller =
+		area->area_motion_controller;
+	gtk_widget_add_controller
+		(GTK_WIDGET(area), area_motion_controller);
+
+	g_signal_connect(	area_motion_controller,
+				"motion",
+				G_CALLBACK(motion_handler),
+				area );
+
+	GtkEventController *area_click_gesture =
+		GTK_EVENT_CONTROLLER(gtk_gesture_click_new());
+	gtk_widget_add_controller
+		(GTK_WIDGET(area), area_click_gesture);
+
+	g_signal_connect(	area_click_gesture,
+				"pressed",
+				G_CALLBACK(pressed_handler),
+				area );
+
+	GtkEventController *control_box_motion_controller =
+		gtk_event_controller_motion_new();
+	gtk_widget_add_controller
+		(GTK_WIDGET(area->control_box), control_box_motion_controller);
+
+	g_signal_connect(	control_box_motion_controller,
+				"enter",
+				G_CALLBACK(enter_handler),
+				area );
+	g_signal_connect(	control_box_motion_controller,
+				"leave",
+				G_CALLBACK(leave_handler),
+				area );
+
+	GtkEventController *header_bar_motion_controller =
+		gtk_event_controller_motion_new();
+	gtk_widget_add_controller
+		(GTK_WIDGET(area->header_bar), header_bar_motion_controller);
+
+	g_signal_connect(	header_bar_motion_controller,
+				"enter",
+				G_CALLBACK(enter_handler),
+				area );
+	g_signal_connect(	header_bar_motion_controller,
+				"leave",
+				G_CALLBACK(leave_handler),
+				area );
+
+	g_signal_connect(	area,
+				"destroy",
+				G_CALLBACK(destroy_handler),
+				area );
 	g_signal_connect(	area->gl_area,
 				"render",
 				G_CALLBACK(render_handler),
+				area );
+	g_signal_connect(	area->gl_area,
+				"resize",
+				G_CALLBACK(resize_handler),
 				area );
 	g_signal_connect(	area->control_box,
 				"notify::volume-popup-visible",
@@ -433,27 +633,42 @@ celluloid_video_area_init(CelluloidVideoArea *area)
 				"notify::child-revealed",
 				G_CALLBACK(reveal_notify_handler),
 				area );
-	g_signal_connect(	area,
-				"enter-notify-event",
-				G_CALLBACK(fs_control_crossing_handler),
-				area );
-	g_signal_connect(	area,
-				"leave-notify-event",
-				G_CALLBACK(fs_control_crossing_handler),
-				area );
 
-	gtk_stack_add_named(GTK_STACK(area->stack), area->draw_area, "draw");
-	gtk_stack_add_named(GTK_STACK(area->stack), area->gl_area, "gl");
-	gtk_stack_set_visible_child(GTK_STACK(area->stack), area->draw_area);
+	adw_status_page_set_icon_name
+		(	ADW_STATUS_PAGE(area->initial_page),
+			"io.github.celluloid_player.Celluloid" );
 
-	gtk_container_add(	GTK_CONTAINER(area->header_bar_revealer),
+	gtk_stack_add_child(GTK_STACK(area->stack), area->gl_area);
+	gtk_stack_add_child(GTK_STACK(area->stack), area->initial_page);
+
+	celluloid_video_area_set_status
+		(area, CELLULOID_VIDEO_AREA_STATUS_LOADING);
+
+	gtk_widget_set_hexpand(area->stack, TRUE);
+
+	gtk_revealer_set_child(	GTK_REVEALER(area->header_bar_revealer),
 				area->header_bar );
-	gtk_container_add(	GTK_CONTAINER(area->control_box_revealer),
+	gtk_revealer_set_child(	GTK_REVEALER(area->control_box_revealer),
 				area->control_box );
 
-	gtk_overlay_add_overlay(GTK_OVERLAY(area), area->control_box_revealer);
-	gtk_overlay_add_overlay(GTK_OVERLAY(area), area->header_bar_revealer);
-	gtk_container_add(GTK_CONTAINER(area), area->stack);
+	gtk_overlay_add_overlay
+		(GTK_OVERLAY(area->overlay), area->control_box_revealer);
+	gtk_overlay_add_overlay
+		(GTK_OVERLAY(area->overlay), area->header_bar_revealer);
+	gtk_overlay_set_measure_overlay
+		(GTK_OVERLAY(area->overlay), area->control_box_revealer, TRUE);
+	gtk_overlay_set_child
+		(GTK_OVERLAY(area->overlay), area->stack);
+
+	adw_toast_overlay_set_child
+		(ADW_TOAST_OVERLAY(area->toast_overlay), area->overlay);
+	gtk_box_append
+		(GTK_BOX(area), area->toast_overlay);
+
+	celluloid_control_box_set_floating
+		(CELLULOID_CONTROL_BOX (area->control_box), TRUE);
+	celluloid_header_bar_set_floating
+		(CELLULOID_HEADER_BAR (area->header_bar), TRUE);
 }
 
 GtkWidget *
@@ -479,29 +694,31 @@ celluloid_video_area_update_disc_list(	CelluloidVideoArea *area,
 }
 
 void
-celluloid_video_area_set_fullscreen_state(	CelluloidVideoArea *area,
-						gboolean fullscreen )
+celluloid_video_area_show_toast_message(	CelluloidVideoArea *area,
+						const gchar *msg)
 {
-	if(area->fullscreen != fullscreen)
+	AdwToast *toast = adw_toast_new(msg);
+	AdwToastOverlay *toast_overlay = ADW_TOAST_OVERLAY(area->toast_overlay);
+
+	adw_toast_overlay_add_toast(toast_overlay, toast);
+}
+
+void
+celluloid_video_area_set_reveal_control_box(	CelluloidVideoArea *area,
+						gboolean reveal )
+{
+	gtk_revealer_set_reveal_child
+		(GTK_REVEALER(area->control_box_revealer), reveal);
+	g_source_clear
+		(&area->timeout_tag);
+
+	if(reveal)
 	{
-		area->fullscreen = fullscreen;
-
-		gtk_widget_hide(area->header_bar_revealer);
-		set_cursor_visible(area, !fullscreen);
-
-		gtk_revealer_set_reveal_child
-			(GTK_REVEALER(area->control_box_revealer), FALSE);
-		gtk_revealer_set_reveal_child
-			(GTK_REVEALER(area->header_bar_revealer), FALSE);
-
-		celluloid_header_bar_set_fullscreen_state
-			(CELLULOID_HEADER_BAR(area->header_bar), fullscreen);
-
-		if(area->control_box)
-		{
-			celluloid_control_box_set_fullscreen_state
-				(CELLULOID_CONTROL_BOX(area->control_box), fullscreen);
-		}
+		area->timeout_tag =
+			g_timeout_add_seconds
+			(	FS_CONTROL_HIDE_DELAY,
+				timeout_handler,
+				area );
 	}
 }
 
@@ -513,24 +730,65 @@ celluloid_video_area_set_control_box_visible(	CelluloidVideoArea *area,
 }
 
 void
-celluloid_video_area_set_use_opengl(	CelluloidVideoArea *area,
-					gboolean use_opengl )
+celluloid_video_area_set_status(	CelluloidVideoArea *area,
+					CelluloidVideoAreaStatus status )
 {
-	gtk_stack_set_visible_child
-		(	GTK_STACK(area->stack),
-			use_opengl?area->gl_area:area->draw_area );
+	switch(status)
+	{
+		case CELLULOID_VIDEO_AREA_STATUS_LOADING:
+		adw_status_page_set_title
+			(	ADW_STATUS_PAGE(area->initial_page),
+				_("Loading…") );
+		adw_status_page_set_description
+			(	ADW_STATUS_PAGE(area->initial_page),
+				NULL );
+		gtk_stack_set_visible_child
+			(GTK_STACK(area->stack), area->initial_page);
+		break;
+
+		case CELLULOID_VIDEO_AREA_STATUS_IDLE:
+		adw_status_page_set_title
+			(	ADW_STATUS_PAGE(area->initial_page),
+				_("Welcome") );
+		adw_status_page_set_description
+			(	ADW_STATUS_PAGE(area->initial_page),
+				_("Click the <b>＋</b> button or drag and drop videos here") );
+		gtk_stack_set_visible_child
+			(GTK_STACK(area->stack), area->initial_page);
+		break;
+
+		case CELLULOID_VIDEO_AREA_STATUS_PLAYING:
+		gtk_stack_set_visible_child
+			(GTK_STACK(area->stack), area->gl_area);
+		break;
+	}
+
+
+
+	area->status = status;
+}
+
+gboolean
+celluloid_video_area_get_control_box_visible(CelluloidVideoArea *area)
+{
+	return gtk_widget_get_visible(area->control_box_revealer);
+}
+
+void
+celluloid_video_area_set_use_floating_header_bar(	CelluloidVideoArea *area,
+							gboolean floating )
+{
+	area->use_floating_header_bar = floating;
+
+	gtk_revealer_set_reveal_child
+		(	GTK_REVEALER(area->header_bar_revealer),
+			area->use_floating_header_bar );
 }
 
 void
 celluloid_video_area_queue_render(CelluloidVideoArea *area)
 {
 	gtk_gl_area_queue_render(GTK_GL_AREA(area->gl_area));
-}
-
-GtkDrawingArea *
-celluloid_video_area_get_draw_area(CelluloidVideoArea *area)
-{
-	return GTK_DRAWING_AREA(area->draw_area);
 }
 
 GtkGLArea *
@@ -558,21 +816,21 @@ celluloid_video_area_get_xid(CelluloidVideoArea *area)
 	if(GDK_IS_X11_DISPLAY(gdk_display_get_default()))
 	{
 		GtkWidget *parent = gtk_widget_get_parent(GTK_WIDGET(area));
-		GdkWindow *window = NULL;
+		GdkSurface *surface = NULL;
 
-		if(parent && !gtk_widget_get_realized(area->draw_area))
+		if(parent && !gtk_widget_get_realized(area->gl_area))
 		{
-			gtk_widget_realize(area->draw_area);
+			gtk_widget_realize(area->gl_area);
 		}
 
-		window = gtk_widget_get_window(area->draw_area);
+		surface = gtk_widget_get_surface(area);
 
-		if(!window)
+		if(!surface)
 		{
 			g_critical("Failed to get XID of video area");
 		}
 
-		return window?(gint64)gdk_x11_window_get_xid(window):-1;
+		return surface?(gint64)gdk_x11_surface_get_xid(surface):-1;
 	}
 #endif
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2021 gnome-mpv
+ * Copyright (c) 2017-2024 gnome-mpv
  *
  * This file is part of Celluloid.
  *
@@ -23,12 +23,47 @@
 
 #include "celluloid-option-parser.h"
 #include "celluloid-player.h"
-#include "celluloid-player-private.h"
 #include "celluloid-player-options.h"
 #include "celluloid-marshal.h"
 #include "celluloid-metadata-cache.h"
-#include "celluloid-mpv-wrapper.h"
+#include "celluloid-mpv.h"
 #include "celluloid-def.h"
+
+#define get_private(player) \
+	((CelluloidPlayerPrivate *)celluloid_player_get_instance_private(CELLULOID_PLAYER(player)))
+
+typedef struct _CelluloidPlayerPrivate CelluloidPlayerPrivate;
+
+enum
+{
+	PROP_0,
+	PROP_PLAYLIST,
+	PROP_METADATA,
+	PROP_CHAPTER_LIST,
+	PROP_TRACK_LIST,
+	PROP_DISC_LIST,
+	PROP_EXTRA_OPTIONS,
+	N_PROPERTIES
+};
+
+struct _CelluloidPlayerPrivate
+{
+	CelluloidMpv parent;
+	CelluloidMetadataCache *cache;
+	GVolumeMonitor *monitor;
+	GPtrArray *playlist;
+	GPtrArray *metadata;
+	GPtrArray *chapter_list;
+	GPtrArray *track_list;
+	GPtrArray *disc_list;
+	GHashTable *log_levels;
+	GHashTable *script_options;
+	gboolean loaded;
+	gboolean new_file;
+	gboolean init_vo_config;
+	gchar *tmp_input_config;
+	gchar *extra_options;
+};
 
 static void
 set_property(	GObject *object,
@@ -69,8 +104,11 @@ mpv_property_changed(CelluloidMpv *mpv, const gchar *name, gpointer value);
 static void
 observe_properties(CelluloidMpv *mpv);
 
+static gchar *
+build_script_opts_string(CelluloidPlayer *player);
+
 static void
-apply_default_options(CelluloidMpv *mpv);
+apply_default_options(CelluloidPlayer *player);
 
 static void
 initialize(CelluloidMpv *mpv);
@@ -97,7 +135,18 @@ static void
 load_input_config_file(CelluloidPlayer *player);
 
 static void
+load_script_opts_from_file(	CelluloidPlayer *player,
+				const gchar *prefix,
+				const gchar *path );
+
+static void
+load_script_opts(CelluloidPlayer *player);
+
+static void
 load_scripts(CelluloidPlayer *player);
+
+static CelluloidChapter *
+convert_mpv_chapter(mpv_node_list *node);
 
 static CelluloidTrack *
 parse_track_entry(mpv_node_list *node);
@@ -116,6 +165,9 @@ update_playlist(CelluloidPlayer *player);
 
 static void
 update_metadata(CelluloidPlayer *player);
+
+static void
+update_chapter_list(CelluloidPlayer *player);
 
 static void
 update_track_list(CelluloidPlayer *player);
@@ -148,6 +200,7 @@ set_property(	GObject *object,
 	{
 		case PROP_PLAYLIST:
 		case PROP_METADATA:
+		case PROP_CHAPTER_LIST:
 		case PROP_TRACK_LIST:
 		case PROP_DISC_LIST:
 		g_critical("Attempted to set read-only property");
@@ -180,6 +233,10 @@ get_property(	GObject *object,
 
 		case PROP_METADATA:
 		g_value_set_pointer(value, priv->metadata);
+		break;
+
+		case PROP_CHAPTER_LIST:
+		g_value_set_pointer(value, priv->chapter_list);
 		break;
 
 		case PROP_TRACK_LIST:
@@ -225,6 +282,7 @@ finalize(GObject *object)
 	g_free(priv->extra_options);
 	g_ptr_array_free(priv->playlist, TRUE);
 	g_ptr_array_free(priv->metadata, TRUE);
+	g_ptr_array_free(priv->chapter_list, TRUE);
 	g_ptr_array_free(priv->track_list, TRUE);
 	g_ptr_array_free(priv->disc_list, TRUE);
 
@@ -402,6 +460,10 @@ mpv_property_changed(CelluloidMpv *mpv, const gchar *name, gpointer value)
 	{
 		update_metadata(player);
 	}
+	else if(g_strcmp0(name, "chapter-list") == 0)
+	{
+		update_chapter_list(player);
+	}
 	else if(g_strcmp0(name, "track-list") == 0)
 	{
 		update_track_list(player);
@@ -411,7 +473,6 @@ mpv_property_changed(CelluloidMpv *mpv, const gchar *name, gpointer value)
 		if(priv->init_vo_config)
 		{
 			priv->init_vo_config = FALSE;
-			load_scripts(player);
 			load_from_playlist(player);
 		}
 	}
@@ -426,13 +487,15 @@ observe_properties(CelluloidMpv *mpv)
 	celluloid_mpv_observe_property(mpv, 0, "aid", MPV_FORMAT_STRING);
 	celluloid_mpv_observe_property(mpv, 0, "vid", MPV_FORMAT_STRING);
 	celluloid_mpv_observe_property(mpv, 0, "sid", MPV_FORMAT_STRING);
+	celluloid_mpv_observe_property(mpv, 0, "chapter-list", MPV_FORMAT_NODE);
 	celluloid_mpv_observe_property(mpv, 0, "chapters", MPV_FORMAT_INT64);
 	celluloid_mpv_observe_property(mpv, 0, "core-idle", MPV_FORMAT_FLAG);
 	celluloid_mpv_observe_property(mpv, 0, "idle-active", MPV_FORMAT_FLAG);
 	celluloid_mpv_observe_property(mpv, 0, "border", MPV_FORMAT_FLAG);
 	celluloid_mpv_observe_property(mpv, 0, "fullscreen", MPV_FORMAT_FLAG);
 	celluloid_mpv_observe_property(mpv, 0, "pause", MPV_FORMAT_FLAG);
-	celluloid_mpv_observe_property(mpv, 0, "loop", MPV_FORMAT_STRING);
+	celluloid_mpv_observe_property(mpv, 0, "loop-file", MPV_FORMAT_STRING);
+	celluloid_mpv_observe_property(mpv, 0, "loop-playlist", MPV_FORMAT_STRING);
 	celluloid_mpv_observe_property(mpv, 0, "duration", MPV_FORMAT_DOUBLE);
 	celluloid_mpv_observe_property(mpv, 0, "media-title", MPV_FORMAT_STRING);
 	celluloid_mpv_observe_property(mpv, 0, "metadata", MPV_FORMAT_NODE);
@@ -448,11 +511,40 @@ observe_properties(CelluloidMpv *mpv)
 	celluloid_mpv_observe_property(mpv, 0, "window-scale", MPV_FORMAT_DOUBLE);
 }
 
+static gchar *
+build_script_opts_string(CelluloidPlayer *player)
+{
+	CelluloidPlayerPrivate *priv = get_private(player);
+	GList *keys = g_hash_table_get_keys(priv->script_options);
+	GList *values = g_hash_table_get_values(priv->script_options);
+	GString *accum = g_string_new(NULL);
+
+	while(keys && values)
+	{
+		const gchar *key = keys->data;
+		const gchar *value = values->data;
+		gchar *suboption = g_strdup_printf("%s=%s,", key, value);
+
+		g_string_append(accum, suboption);
+
+		keys = keys->next;
+		values = values->next;
+
+		g_free(suboption);
+	}
+
+	g_list_free(values);
+	g_list_free(keys);
+
+	return accum->str;
+}
+
 static void
-apply_default_options(CelluloidMpv *mpv)
+apply_default_options(CelluloidPlayer *player)
 {
 	gchar *config_dir = get_config_dir_path();
 	gchar *watch_dir = get_watch_dir_path();
+	gchar *script_opts_string = build_script_opts_string(player);
 	const gchar *screenshot_dir =	g_get_user_special_dir
 					(G_USER_DIRECTORY_PICTURES);
 
@@ -461,8 +553,7 @@ apply_default_options(CelluloidMpv *mpv)
 		const gchar *name;
 		const gchar *value;
 	}
-	options[] = {	{"vo", "opengl,vdpau,vaapi,xv,x11,libmpv,"},
-			{"osd-level", "1"},
+	options[] = {	{"osd-level", "1"},
 			{"softvol", "yes"},
 			{"force-window", "immediate"},
 			{"input-default-bindings", "yes"},
@@ -474,14 +565,17 @@ apply_default_options(CelluloidMpv *mpv)
 			{"ytdl", "yes"},
 			{"ytdl-raw-options", "yes-playlist="},
 			{"load-scripts", "no"},
+			{"script-opts", script_opts_string},
 			{"osd-bar", "no"},
 			{"input-cursor", "no"},
 			{"cursor-autohide", "no"},
 			{"softvol-max", "100"},
 			{"config-dir", config_dir},
 			{"watch-later-directory", watch_dir},
+			{"screenshot-format", "png"},
 			{"screenshot-directory", screenshot_dir},
-			{"screenshot-template", "celluloid-shot%n"},
+			{"screenshot-template", "%f-%P"},
+			{"slang", "auto"},
 			{NULL, NULL} };
 
 	for(gint i = 0; options[i].name; i++)
@@ -491,9 +585,12 @@ apply_default_options(CelluloidMpv *mpv)
 				options[i].value );
 
 		celluloid_mpv_set_option_string
-			(mpv, options[i].name, options[i].value);
+			(	CELLULOID_MPV(player),
+				options[i].name,
+				options[i].value );
 	}
 
+	g_free(script_opts_string);
 	g_free(config_dir);
 	g_free(watch_dir);
 }
@@ -503,13 +600,16 @@ initialize(CelluloidMpv *mpv)
 {
 	CelluloidPlayer *player = CELLULOID_PLAYER(mpv);
 
-	apply_default_options(mpv);
+	load_script_opts(player);
+	apply_default_options(player);
 	load_config_file(mpv);
 	load_input_config_file(player);
 	apply_extra_options(player);
 	observe_properties(mpv);
 
 	CELLULOID_MPV_CLASS(celluloid_player_parent_class)->initialize(mpv);
+
+	load_scripts(player);
 }
 
 static gint
@@ -631,6 +731,7 @@ reset(CelluloidMpv *mpv)
 
 	CELLULOID_MPV_CLASS(celluloid_player_parent_class)->reset(mpv);
 
+	load_script_opts(CELLULOID_PLAYER(mpv));
 	load_scripts(CELLULOID_PLAYER(mpv));
 
 	if(!idle_active)
@@ -693,18 +794,22 @@ load_input_conf(CelluloidPlayer *player, const gchar *input_conf)
 	{
 		const gsize buf_size = 65536;
 		void *buf = g_malloc(buf_size);
-		FILE *src_file = g_fopen(input_conf, "r");
+		GFile *src_file = g_file_new_for_uri(input_conf);
+		GFileInputStream *src_stream = g_file_read(src_file, NULL, NULL);
 		gsize read_size = buf_size;
 
-		if(!src_file)
+		if(!src_stream)
 		{
 			g_warning(	"Cannot open input config file: %s",
 					input_conf );
 		}
 
-		while(src_file && read_size == buf_size)
+		while(src_stream && read_size == buf_size)
 		{
-			read_size = fread(buf, 1, buf_size, src_file);
+			read_size =
+				(gsize)
+				g_input_stream_read
+				(G_INPUT_STREAM(src_stream), buf, buf_size, NULL, NULL);
 
 			if(read_size != fwrite(buf, 1, read_size, tmp_file))
 			{
@@ -716,6 +821,8 @@ load_input_conf(CelluloidPlayer *player, const gchar *input_conf)
 
 		g_info("Loaded input config file: %s", input_conf);
 
+		g_clear_object(&src_stream);
+		g_object_unref(src_file);
 		g_free(buf);
 	}
 
@@ -729,12 +836,27 @@ load_config_file(CelluloidMpv *mpv)
 
 	if(g_settings_get_boolean(settings, "mpv-config-enable"))
 	{
-		gchar *mpv_conf =	g_settings_get_string
-					(settings, "mpv-config-file");
+		gchar *mpv_conf =
+			g_settings_get_string(settings, "mpv-config-file");
 
-		g_info("Loading config file: %s", mpv_conf);
-		celluloid_mpv_load_config_file(mpv, mpv_conf);
+		GFile *file = g_file_new_for_uri(mpv_conf);
+		gchar *path = g_file_get_path(file);
 
+		g_info("Loading mpv config file: %s", mpv_conf);
+
+		if(path)
+		{
+			g_debug("mpv config file path: %s", path);
+			celluloid_mpv_load_config_file(mpv, path);
+
+			g_free(path);
+		}
+		else
+		{
+			g_warning("Failed to load mpv config file");
+		}
+
+		g_object_unref(file);
 		g_free(mpv_conf);
 	}
 
@@ -762,6 +884,121 @@ load_input_config_file(CelluloidPlayer *player)
 }
 
 static void
+load_script_opts_from_file(	CelluloidPlayer *player,
+				const gchar *prefix,
+				const gchar *path )
+{
+	GError *error = NULL;
+	gsize contents_length = 0;
+	gchar *contents = NULL;
+
+	const gchar group_name[] = "main";
+	const gchar group_header[] = "[main]\n";
+	gchar *data = NULL;
+	gsize data_length = 0;
+
+	GKeyFile *key_file = NULL;
+
+	g_file_get_contents(path, &contents, &contents_length, &error);
+
+	if(!error)
+	{
+		// GKeyFile can't parse files without section headers, so we
+		// need to stick a header in to get it to parse.
+		data = g_strconcat(group_header, contents, NULL);
+		data_length = contents_length + sizeof(group_header);
+	}
+
+	if(!error)
+	{
+		key_file = g_key_file_new();
+
+		g_key_file_load_from_data
+			(key_file, data, data_length, G_KEY_FILE_NONE, &error);
+	}
+
+	if(!error)
+	{
+		gsize n_keys = 0;
+
+		gchar **keys =
+			g_key_file_get_keys
+			(key_file, group_name, &n_keys, NULL);
+		GHashTable *script_options =
+			get_private(player)->script_options;
+
+		for(gsize i = 0; i < n_keys; i++)
+		{
+			gchar *value =
+				g_key_file_get_string
+				(key_file, group_name, keys[i], NULL);
+			gchar *prefixed_key =
+				g_strdup_printf
+				("%s-%s", prefix, keys[i]);
+
+			g_hash_table_insert
+				(script_options, prefixed_key, value);
+		}
+
+		g_strfreev(keys);
+	}
+
+
+	if(error)
+	{
+		g_warning(	"Failed to load script options file %s: %s",
+				path,
+				error->message );
+
+		g_error_free(error);
+	}
+
+	g_key_file_free(key_file);
+	g_free(data);
+	g_free(contents);
+}
+
+static void
+load_script_opts(CelluloidPlayer *player)
+{
+	gchar *path = get_script_opts_dir_path();
+	GDir *dir = g_dir_open(path, 0, NULL);
+
+	if(dir)
+	{
+		const gchar *name = g_dir_read_name(dir);
+
+		while(name)
+		{
+			gchar *full_path = g_build_filename(path, name, NULL);
+			const gchar *suffix = g_utf8_strchr(name, -1, '.');
+			gchar *prefix = g_utf8_substring(name, 0, suffix - name);
+			if(g_file_test(full_path, G_FILE_TEST_IS_REGULAR))
+			{
+				g_info(	"Loading script options file: %s",
+					full_path );
+
+				load_script_opts_from_file
+					(player, prefix, full_path);
+			}
+
+			name = g_dir_read_name(dir);
+
+			g_free(prefix);
+			g_free(full_path);
+		}
+
+		g_dir_close(dir);
+	}
+	else
+	{
+		g_warning("Failed to open script options directory: %s", path);
+	}
+
+	g_free(path);
+}
+
+static void
 load_scripts(CelluloidPlayer *player)
 {
 	gchar *path = get_scripts_dir_path();
@@ -769,28 +1006,20 @@ load_scripts(CelluloidPlayer *player)
 
 	if(dir)
 	{
-		const gchar *name;
+		const gchar *name = g_dir_read_name(dir);
 
-		do
+		while(name)
 		{
-			gchar *full_path;
+			gchar *full_path = g_build_filename(path, name, NULL);
+			const gchar *cmd[] = {"load-script", full_path, NULL};
+
+			g_info("Loading script: %s", full_path);
+			celluloid_mpv_command(CELLULOID_MPV(player), cmd);
 
 			name = g_dir_read_name(dir);
-			full_path = g_build_filename(path, name, NULL);
-
-			if(g_file_test(full_path, G_FILE_TEST_IS_REGULAR))
-			{
-				const gchar *cmd[]
-					= {"load-script", full_path, NULL};
-
-				g_info("Loading script: %s", full_path);
-				celluloid_mpv_command
-					(CELLULOID_MPV(player), cmd);
-			}
 
 			g_free(full_path);
 		}
-		while(name);
 
 		g_dir_close(dir);
 	}
@@ -800,6 +1029,26 @@ load_scripts(CelluloidPlayer *player)
 	}
 
 	g_free(path);
+}
+
+static CelluloidChapter *
+convert_mpv_chapter(mpv_node_list *node)
+{
+	CelluloidChapter *chapter = celluloid_chapter_new();
+
+	for(gint i = 0; i < node->num; i++)
+	{
+		if(g_strcmp0(node->keys[i], "title") == 0)
+		{
+			chapter->title = g_strdup(node->values[i].u.string);
+		}
+		else if(g_strcmp0(node->keys[i], "time") == 0)
+		{
+			chapter->time = node->values[i].u.double_;
+		}
+	}
+
+	return chapter;
 }
 
 static CelluloidTrack *
@@ -955,7 +1204,7 @@ update_metadata(CelluloidPlayer *player)
 
 	org_list = metadata.u.list;
 
-	if(metadata.format == MPV_FORMAT_NODE_MAP && org_list->num > 0)
+	if(metadata.format == MPV_FORMAT_NODE_MAP)
 	{
 		for(gint i = 0; i < org_list->num; i++)
 		{
@@ -985,6 +1234,38 @@ update_metadata(CelluloidPlayer *player)
 
 		mpv_free_node_contents(&metadata);
 		g_object_notify(G_OBJECT(player), "metadata");
+	}
+}
+
+static void
+update_chapter_list(CelluloidPlayer *player)
+{
+	CelluloidPlayerPrivate *priv = get_private(player);
+	mpv_node_list *org_list = NULL;
+	mpv_node chapter_list;
+
+	g_ptr_array_set_size(priv->chapter_list, 0);
+	celluloid_mpv_get_property(	CELLULOID_MPV(player),
+					"chapter-list",
+					MPV_FORMAT_NODE,
+					&chapter_list );
+
+	org_list = chapter_list.u.list;
+
+	if(chapter_list.format == MPV_FORMAT_NODE_ARRAY)
+	{
+		for(gint i = 0; i < org_list->num; i++)
+		{
+			CelluloidChapter *chapter =
+				convert_mpv_chapter
+				(org_list->values[i].u.list);
+
+			g_ptr_array_add(priv->chapter_list, chapter);
+		}
+
+		mpv_free_node_contents(&chapter_list);
+
+		g_object_notify(G_OBJECT(player), "chapter-list");
 	}
 }
 
@@ -1039,7 +1320,7 @@ cache_update_handler(	CelluloidMetadataCache *cache,
 			entry->title = g_strdup(cache_entry->title);
 
 			g_signal_emit_by_name
-				(data, "metadata-update", (gint64)i);
+				(data, "metadata-cache-update", (gint64)i);
 		}
 	}
 }
@@ -1173,6 +1454,13 @@ celluloid_player_class_init(CelluloidPlayerClass *klass)
 	g_object_class_install_property(obj_class, PROP_METADATA, pspec);
 
 	pspec = g_param_spec_pointer
+		(	"chapter-list",
+			"Chapter list",
+			"List of chapters of the current file",
+			G_PARAM_READABLE );
+	g_object_class_install_property(obj_class, PROP_CHAPTER_LIST, pspec);
+
+	pspec = g_param_spec_pointer
 		(	"track-list",
 			"Track list",
 			"Audio, video, and subtitle tracks of the current file",
@@ -1203,7 +1491,7 @@ celluloid_player_class_init(CelluloidPlayerClass *klass)
 			g_cclosure_marshal_VOID__VOID,
 			G_TYPE_NONE,
 			0 );
-	g_signal_new(	"metadata-update",
+	g_signal_new(	"metadata-cache-update",
 			G_TYPE_FROM_CLASS(klass),
 			G_SIGNAL_RUN_FIRST,
 			0,
@@ -1226,11 +1514,15 @@ celluloid_player_init(CelluloidPlayer *player)
 				((GDestroyNotify)celluloid_playlist_entry_free);
 	priv->metadata =	g_ptr_array_new_with_free_func
 				((GDestroyNotify)celluloid_metadata_entry_free);
+	priv->chapter_list =	g_ptr_array_new_with_free_func
+				((GDestroyNotify)celluloid_chapter_free);
 	priv->track_list =	g_ptr_array_new_with_free_func
 				((GDestroyNotify)celluloid_track_free);
 	priv->disc_list =	g_ptr_array_new_with_free_func
 				((GDestroyNotify)celluloid_disc_free);
 	priv->log_levels =	g_hash_table_new_full
+				(g_str_hash, g_str_equal, g_free, NULL);
+	priv->script_options =	g_hash_table_new_full
 				(g_str_hash, g_str_equal, g_free, NULL);
 
 	priv->loaded = FALSE;
@@ -1299,23 +1591,15 @@ celluloid_player_remove_playlist_entry(CelluloidPlayer *player, gint64 position)
 	CelluloidMpv *mpv = CELLULOID_MPV(player);
 	gboolean idle_active =	celluloid_mpv_get_property_flag
 				(mpv, "idle-active");
-	gint64 playlist_count = 0;
 
-	celluloid_mpv_get_property
-		(mpv, "playlist-count", MPV_FORMAT_INT64, &playlist_count);
-
-	/* mpv doesn't send playlist change signal before going idle when the
-	 * last playlist entry is removed, so the internal playlist needs to be
-	 * directly updated.
-	 */
-	if(idle_active || playlist_count == 1)
+	if(idle_active)
 	{
-		g_ptr_array_remove_index(	get_private(player)->playlist,
-						(guint)position );
+		CelluloidPlayerPrivate *priv = get_private(player);
+
+		g_ptr_array_remove_index(priv->playlist, (guint)position);
 		g_object_notify(G_OBJECT(player), "playlist");
 	}
-
-	if(!idle_active)
+	else
 	{
 		const gchar *cmd[] = {"playlist_remove", NULL, NULL};
 		gchar *index_str =	g_strdup_printf
@@ -1339,18 +1623,17 @@ celluloid_player_move_playlist_entry(	CelluloidPlayer *player,
 
 	if(idle_active)
 	{
-		GPtrArray *playlist;
-		CelluloidPlaylistEntry **entry;
+		GPtrArray *playlist =
+			get_private(player)->playlist;
+		const gint64 entry_index =
+			(src > dst) ? src - 1 : src;
+		CelluloidPlaylistEntry *entry =
+			g_ptr_array_index(playlist, entry_index);
 
-		playlist = get_private(player)->playlist;
-		entry = (CelluloidPlaylistEntry **)
-			&g_ptr_array_index(playlist, src);
+		g_ptr_array_insert(playlist, (gint)dst, entry);
+		g_ptr_array_steal_index(playlist, (guint)src);
 
-		g_ptr_array_insert(playlist, (gint)dst, *entry);
-
-		/* Prevent the entry from being freed */
-		*entry = NULL;
-		g_ptr_array_remove_index(playlist, (guint)((src > dst)?--src:src));
+		g_object_notify(G_OBJECT(player), "playlist");
 	}
 	else
 	{

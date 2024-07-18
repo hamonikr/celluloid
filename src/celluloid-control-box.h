@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2019 gnome-mpv
+ * Copyright (c) 2014-2019, 2022 gnome-mpv
  *
  * This file is part of Celluloid.
  *
@@ -53,8 +53,7 @@ gboolean
 celluloid_control_box_get_volume_popup_visible(CelluloidControlBox *box);
 
 void
-celluloid_control_box_set_fullscreen_state(	CelluloidControlBox *box,
-						gboolean fullscreen );
+celluloid_control_box_set_floating(CelluloidControlBox *box, gboolean floating);
 
 void
 celluloid_control_box_reset(CelluloidControlBox *box);

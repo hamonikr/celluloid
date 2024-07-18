@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2020 gnome-mpv
+ * Copyright (c) 2014-2022 gnome-mpv
  *
  * This file is part of Celluloid.
  *
@@ -23,12 +23,16 @@
 #include <glib.h>
 #include <gtk/gtk.h>
 
+#define gtk_widget_get_surface(x) \
+	gtk_native_get_surface(gtk_widget_get_native(GTK_WIDGET(x)))
+
 G_BEGIN_DECLS
 
 typedef enum TrackType TrackType;
 
 typedef struct _CelluloidPlaylistEntry CelluloidPlaylistEntry;
 typedef struct _CelluloidMetadataEntry CelluloidMetadataEntry;
+typedef struct CelluloidChapter CelluloidChapter;
 typedef struct CelluloidTrack CelluloidTrack;
 typedef struct CelluloidDisc CelluloidDisc;
 
@@ -53,6 +57,12 @@ struct _CelluloidMetadataEntry
 {
 	gchar *key;
 	gchar *value;
+};
+
+struct CelluloidChapter
+{
+	gchar *title;
+	gdouble time;
 };
 
 struct CelluloidTrack
@@ -81,6 +91,12 @@ celluloid_metadata_entry_new(const gchar *key, const gchar *value);
 void
 celluloid_metadata_entry_free(CelluloidMetadataEntry *entry);
 
+CelluloidChapter *
+celluloid_chapter_new(void);
+
+void
+celluloid_chapter_free(CelluloidChapter *entry);
+
 CelluloidTrack *
 celluloid_track_new(void);
 
@@ -100,6 +116,9 @@ gchar *
 get_scripts_dir_path(void);
 
 gchar *
+get_script_opts_dir_path(void);
+
+gchar *
 get_watch_dir_path(void);
 
 gchar *
@@ -114,17 +133,22 @@ extension_matches(const gchar *filename, const gchar **extensions);
 gboolean
 g_source_clear(guint *tag);
 
-void *
-gslist_to_array(GSList *slist);
-
 gchar *
 strnjoinv(const gchar *separator, const gchar **str_array, gsize count);
+
+gchar *
+sanitize_utf8(const gchar *str, const gboolean label);
 
 char *
 format_time(gint seconds, gboolean show_hour);
 
 void
 activate_action_string(GActionMap *map, const gchar *str);
+
+gboolean
+g_file_delete_recursive(	GFile *file,
+				GCancellable *cancellable,
+				GError **error);
 
 G_END_DECLS
 

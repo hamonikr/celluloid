@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2019 gnome-mpv
+ * Copyright (c) 2017-2019, 2021-2022 gnome-mpv
  *
  * This file is part of Celluloid.
  *
@@ -19,6 +19,7 @@
 
 #include "celluloid-mpris-track-list.h"
 #include "celluloid-mpris-gdbus.h"
+#include "celluloid-mpris.h"
 #include "celluloid-common.h"
 #include "celluloid-def.h"
 
@@ -35,6 +36,7 @@ struct _CelluloidMprisTrackList
 {
 	CelluloidMprisModule parent;
 	CelluloidController *controller;
+	GHashTable *readonly_table;
 	guint reg_id;
 };
 
@@ -96,7 +98,7 @@ playlist_handler(	GObject *object,
 			gpointer data );
 
 static void
-metadata_update_handler(CelluloidModel *model, gint64 pos, gpointer data);
+metadata_cache_update_handler(CelluloidModel *model, gint64 pos, gpointer data);
 
 static void
 update_playlist(CelluloidMprisTrackList *track_list);
@@ -137,8 +139,8 @@ register_interface(CelluloidMprisModule *module)
 						module );
 	celluloid_mpris_module_connect_signal(	module,
 						model,
-						"metadata-update",
-						G_CALLBACK(metadata_update_handler),
+						"metadata-cache-update",
+						G_CALLBACK(metadata_cache_update_handler),
 						module );
 
 	celluloid_mpris_module_set_properties
@@ -226,6 +228,7 @@ method_handler(	GDBusConnection *connection,
 	CelluloidMprisTrackList *track_list = data;
 	CelluloidModel *model =	celluloid_controller_get_model
 				(track_list->controller);
+	gboolean unknown_method = FALSE;
 	GVariant *return_value = NULL;
 
 	if(g_strcmp0(method_name, "GetTracksMetadata") == 0)
@@ -283,12 +286,22 @@ method_handler(	GDBusConnection *connection,
 	}
 	else
 	{
-		g_critical("Attempted to call unknown method: %s", method_name);
-
-		return_value = g_variant_new("()", NULL);
+		unknown_method = TRUE;
 	}
 
-	g_dbus_method_invocation_return_value(invocation, return_value);
+	if(unknown_method)
+	{
+		g_dbus_method_invocation_return_error
+			(	invocation,
+				CELLULOID_MPRIS_ERROR,
+				CELLULOID_MPRIS_ERROR_UNKNOWN_METHOD,
+				"Attempted to call unknown method \"%s\"",
+				method_name );
+	}
+	else
+	{
+		g_dbus_method_invocation_return_value(invocation, return_value);
+	}
 }
 
 static GVariant *
@@ -300,15 +313,25 @@ get_prop_handler(	GDBusConnection *connection,
 			GError **error,
 			gpointer data )
 {
+	CelluloidMprisTrackList *track_list = CELLULOID_MPRIS_TRACK_LIST(data);
+	CelluloidMprisModule *module = CELLULOID_MPRIS_MODULE(data);
 	GVariant *value = NULL;
 
-	celluloid_mpris_module_get_properties(	CELLULOID_MPRIS_MODULE(data),
-						property_name, &value,
-						NULL );
+	if(!g_hash_table_contains(track_list->readonly_table, property_name))
+	{
+		g_set_error
+			(	error,
+				CELLULOID_MPRIS_ERROR,
+				CELLULOID_MPRIS_ERROR_UNKNOWN_PROPERTY,
+				"Failed to get value of unknown property \"%s\"",
+				property_name );
+	}
+	else
+	{
+		celluloid_mpris_module_get_properties
+			(module, property_name, &value, NULL);
+	}
 
-	/* Call g_variant_ref() to prevent the value of the property in the
-	 * properties table from being freed.
-	 */
 	return value?g_variant_ref(value):NULL;
 }
 
@@ -322,10 +345,26 @@ set_prop_handler(	GDBusConnection *connection,
 			GError **error,
 			gpointer data )
 {
-	g_warning(	"Attempted to set property %s in "
-			"org.mpris.MediaPlayer2.TrackList, but the interface "
-			"only has read-only properties.",
-			property_name );
+	CelluloidMprisTrackList *track_list = CELLULOID_MPRIS_TRACK_LIST(data);
+
+	if(!g_hash_table_contains(track_list->readonly_table, property_name))
+	{
+		g_set_error
+			(	error,
+				CELLULOID_MPRIS_ERROR,
+				CELLULOID_MPRIS_ERROR_UNKNOWN_PROPERTY,
+				"Failed to set value of unknown property \"%s\"",
+				property_name );
+	}
+	else if(GPOINTER_TO_INT(g_hash_table_lookup(track_list->readonly_table, property_name)))
+	{
+		g_set_error
+			(	error,
+				CELLULOID_MPRIS_ERROR,
+				CELLULOID_MPRIS_ERROR_SET_READONLY,
+				"Attempted to set value of readonly property \"%s\"",
+				property_name );
+	}
 
 	/* Always fail since the interface only has read-only properties */
 	return FALSE;
@@ -340,7 +379,7 @@ playlist_handler(	GObject *object,
 }
 
 static void
-metadata_update_handler(CelluloidModel *model, gint64 pos, gpointer data)
+metadata_cache_update_handler(CelluloidModel *model, gint64 pos, gpointer data)
 {
 	GDBusConnection *conn = NULL;
 	GDBusInterfaceInfo *iface = NULL;
@@ -479,6 +518,7 @@ playlist_entry_to_variant(CelluloidPlaylistEntry *entry, gint64 index)
 	GVariantBuilder builder;
 	gchar *track_id = NULL;
 	gchar *title = NULL;
+	gchar *sanitized_title = NULL;
 	gchar *uri = NULL;
 	GVariant *elem_value = NULL;
 
@@ -496,10 +536,11 @@ playlist_entry_to_variant(CelluloidPlaylistEntry *entry, gint64 index)
 	title =	entry->title?
 		g_strdup(entry->title):
 		get_name_from_path(entry->filename);
+	sanitized_title = sanitize_utf8(title, TRUE);
 	elem_value =	g_variant_new
 			(	"{sv}",
 				"xesam:title",
-				g_variant_new_string(title) );
+				g_variant_new_string(sanitized_title) );
 	g_variant_builder_add_value(&builder, elem_value);
 
 	uri =	g_filename_to_uri(entry->filename, NULL, NULL)?:
@@ -512,6 +553,7 @@ playlist_entry_to_variant(CelluloidPlaylistEntry *entry, gint64 index)
 
 	g_free(track_id);
 	g_free(title);
+	g_free(sanitized_title);
 	g_free(uri);
 
 	return g_variant_new("a{sv}", &builder);
@@ -576,8 +618,32 @@ celluloid_mpris_track_list_class_init(CelluloidMprisTrackListClass *klass)
 static void
 celluloid_mpris_track_list_init(CelluloidMprisTrackList *track_list)
 {
-	track_list->controller = NULL;
-	track_list->reg_id = 0;
+	const struct
+	{
+		const gchar *name;
+		gboolean readonly;
+	}
+	properties[] =
+	{
+		{"Tracks", TRUE},
+		{"Fullscreen", TRUE},
+		{NULL, FALSE}
+	};
+
+	track_list->controller =
+		NULL;
+	track_list->readonly_table =
+		g_hash_table_new_full(g_str_hash, g_int_equal, g_free, NULL);
+	track_list->reg_id =
+		0;
+
+	for(gint i = 0; properties[i].name; i++)
+	{
+		g_hash_table_replace
+			(	track_list->readonly_table,
+				g_strdup(properties[i].name),
+				GINT_TO_POINTER(properties[i].readonly) );
+	}
 }
 
 CelluloidMprisModule *

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2019 gnome-mpv
+ * Copyright (c) 2017-2019, 2021 gnome-mpv
  *
  * This file is part of Celluloid.
  *
@@ -83,9 +83,8 @@ set_property(	GObject *object,
 {
 	CelluloidMprisModulePrivate *priv;
 
-	priv =	G_TYPE_INSTANCE_GET_PRIVATE(	object,
-						CELLULOID_TYPE_MPRIS_MODULE,
-						CelluloidMprisModulePrivate );
+	priv =	celluloid_mpris_module_get_instance_private
+		(CELLULOID_MPRIS_MODULE(object));
 
 	switch(property_id)
 	{
@@ -111,9 +110,8 @@ get_property(	GObject *object,
 {
 	CelluloidMprisModulePrivate *priv;
 
-	priv =	G_TYPE_INSTANCE_GET_PRIVATE(	object,
-						CELLULOID_TYPE_MPRIS_MODULE,
-						CelluloidMprisModulePrivate );
+	priv =	celluloid_mpris_module_get_instance_private
+		(CELLULOID_MPRIS_MODULE(object));
 
 	switch(property_id)
 	{
@@ -136,9 +134,8 @@ dispose(GObject *object)
 {
 	CelluloidMprisModulePrivate *priv;
 
-	priv =	G_TYPE_INSTANCE_GET_PRIVATE(	object,
-						CELLULOID_TYPE_MPRIS_MODULE,
-						CelluloidMprisModulePrivate );
+	priv =	celluloid_mpris_module_get_instance_private
+		(CELLULOID_MPRIS_MODULE(object));
 
 	g_hash_table_unref(priv->prop_table);
 
@@ -150,9 +147,8 @@ finalize(GObject *object)
 {
 	CelluloidMprisModulePrivate *priv;
 
-	priv =	G_TYPE_INSTANCE_GET_PRIVATE(	object,
-						CELLULOID_TYPE_MPRIS_MODULE,
-						CelluloidMprisModulePrivate );
+	priv =	celluloid_mpris_module_get_instance_private
+		(CELLULOID_MPRIS_MODULE(object));
 
 	g_slist_foreach(priv->signal_ids, (GFunc)disconnect_signal, NULL);
 	g_slist_free_full(priv->signal_ids, g_free);
@@ -197,9 +193,7 @@ celluloid_mpris_module_init(CelluloidMprisModule *module)
 {
 	CelluloidMprisModulePrivate *priv;
 
-	priv =	G_TYPE_INSTANCE_GET_PRIVATE(	module,
-						CELLULOID_TYPE_MPRIS_MODULE,
-						CelluloidMprisModulePrivate );
+	priv = celluloid_mpris_module_get_instance_private(module);
 
 	priv->conn = NULL;
 	priv->iface = NULL;
@@ -222,9 +216,7 @@ celluloid_mpris_module_connect_signal(	CelluloidMprisModule *module,
 	CelluloidMprisModulePrivate *priv;
 	CelluloidSignalHandlerInfo *info;
 
-	priv =	G_TYPE_INSTANCE_GET_PRIVATE(	module,
-						CELLULOID_TYPE_MPRIS_MODULE,
-						CelluloidMprisModulePrivate );
+	priv = celluloid_mpris_module_get_instance_private(module);
 	info = g_malloc(sizeof(CelluloidSignalHandlerInfo));
 
 	info->instance = instance;
@@ -241,9 +233,7 @@ celluloid_mpris_module_get_properties(CelluloidMprisModule *module, ...)
 	gchar *name;
 	GVariant **value_ptr;
 
-	priv =	G_TYPE_INSTANCE_GET_PRIVATE(	module,
-						CELLULOID_TYPE_MPRIS_MODULE,
-						CelluloidMprisModulePrivate );
+	priv = celluloid_mpris_module_get_instance_private(module);
 
 	va_start(arg, module);
 
@@ -255,6 +245,8 @@ celluloid_mpris_module_get_properties(CelluloidMprisModule *module, ...)
 	{
 		*value_ptr = g_hash_table_lookup(priv->prop_table, name);
 	}
+
+	va_end(arg);
 }
 
 void
@@ -271,9 +263,7 @@ celluloid_mpris_module_set_properties_full(	CelluloidMprisModule *module,
 	const gchar *elem_type_string;
 	GVariant *sig_args;
 
-	priv =	G_TYPE_INSTANCE_GET_PRIVATE(	module,
-						CELLULOID_TYPE_MPRIS_MODULE,
-						CelluloidMprisModulePrivate );
+	priv = celluloid_mpris_module_get_instance_private(module);
 	builder_type_string = send_new_value?"a{sv}":"as";
 	elem_type_string = builder_type_string+1;
 
@@ -295,6 +285,8 @@ celluloid_mpris_module_set_properties_full(	CelluloidMprisModule *module,
 		g_debug("Adding property \"%s\"", name);
 		g_variant_builder_add(&builder, elem_type_string, name, value);
 	}
+
+	va_end(arg);
 
 	sig_args = g_variant_new(	"(sa{sv}as)",
 					priv->iface->name,

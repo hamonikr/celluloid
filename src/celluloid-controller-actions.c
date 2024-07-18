@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2021 gnome-mpv
+ * Copyright (c) 2015-2022 gnome-mpv
  *
  * This file is part of Celluloid.
  *
@@ -524,9 +524,8 @@ static void
 toggle_fullscreen_handler(GSimpleAction *action, GVariant *param, gpointer data)
 {
 	CelluloidView *view = celluloid_controller_get_view(data);
-	gboolean fullscreen = FALSE;
+	const gboolean fullscreen = gtk_window_is_fullscreen(GTK_WINDOW(view));
 
-	g_object_get(view, "fullscreen", &fullscreen, NULL);
 	celluloid_view_set_fullscreen(view, !fullscreen);
 }
 
@@ -554,7 +553,7 @@ set_video_size_handler(GSimpleAction *action, GVariant *param, gpointer data)
 static void
 show_about_dialog_handler(GSimpleAction *action, GVariant *param, gpointer data)
 {
-	celluloid_view_show_about_dialog(celluloid_controller_get_view(data));
+	celluloid_view_show_about_window(celluloid_controller_get_view(data));
 }
 
 void

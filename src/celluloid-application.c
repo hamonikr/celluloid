@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2021 gnome-mpv
+ * Copyright (c) 2016-2021, 2023-2024 gnome-mpv
  *
  * This file is part of Celluloid.
  *
@@ -20,12 +20,19 @@
 #include <glib.h>
 #include <glib/gi18n.h>
 #include <glib/gprintf.h>
+#ifdef G_OS_UNIX
 #include <glib-unix.h>
+#endif
 #include <gio/gio.h>
+#include <gdk/gdk.h>
+#include <adwaita.h>
+#ifdef GDK_WINDOWING_X11
+#include <gdk/x11/gdkx.h>
+#endif
 
 #include "celluloid-application.h"
 #include "celluloid-controller.h"
-#include "celluloid-mpv-wrapper.h"
+#include "celluloid-mpv.h"
 #include "celluloid-common.h"
 #include "celluloid-def.h"
 
@@ -101,47 +108,44 @@ G_DEFINE_TYPE(CelluloidApplication, celluloid_application, GTK_TYPE_APPLICATION)
 static void
 migrate_config()
 {
-	const gchar *keys[] = {	"dark-theme-enable",
-				"csd-enable",
-				"always-use-floating-controls",
-				"always-autohide-cursor",
-				"use-skip-buttons-for-playlist",
-				"last-folder-enable",
-				"always-open-new-window",
-				"mpv-options",
-				"mpv-config-file",
-				"mpv-config-enable",
-				"mpv-input-config-file",
-				"mpv-input-config-enable",
-				"mpris-enable",
-				"media-keys-enable",
-				"prefetch-metadata",
-				NULL };
+	GSettings *settings =
+		g_settings_new(CONFIG_ROOT);
+	const gboolean mpv_config_enable =
+		g_settings_get_boolean(settings, "mpv-config-enable");
 
-	GSettings *old_settings = g_settings_new("io.github.GnomeMpv");
-	GSettings *new_settings = g_settings_new(CONFIG_ROOT);
-
-	if(!g_settings_get_boolean(new_settings, "settings-migrated"))
+	if(mpv_config_enable)
 	{
-		g_settings_set_boolean(new_settings, "settings-migrated", TRUE);
+		gchar *mpv_config_file =
+			g_settings_get_string(settings, "mpv-config-file");
+		const gboolean is_uri =
+			g_uri_is_valid(mpv_config_file, G_URI_FLAGS_NONE, NULL);
+		const gboolean is_absolute_path =
+			g_path_is_absolute(mpv_config_file);
 
-		for(gint i = 0; keys[i]; i++)
+		if(!is_uri && is_absolute_path)
 		{
-			GVariant *buf = g_settings_get_user_value
-						(old_settings, keys[i]);
+			gchar *new_mpv_config_file =
+				g_filename_to_uri(mpv_config_file, NULL, NULL);
 
-			if(buf)
-			{
-				g_settings_set_value
-					(new_settings, keys[i], buf);
+			g_settings_set_string
+				(	settings,
+					"mpv-config-file",
+					new_mpv_config_file );
 
-				g_variant_unref(buf);
-			}
+			g_info(	"Updated mpv-config-file to %s",
+				new_mpv_config_file );
+
+			g_free(new_mpv_config_file);
 		}
+		else if(!is_uri)
+		{
+			g_warning("Failed to update mpv-config-file");
+		}
+
+		g_free(mpv_config_file);
 	}
 
-	g_object_unref(old_settings);
-	g_object_unref(new_settings);
+	g_object_unref(settings);
 }
 
 static void
@@ -160,14 +164,20 @@ initialize_gui(CelluloidApplication *app)
 	settings = g_settings_new(CONFIG_ROOT);
 	app->controllers = g_slist_prepend(app->controllers, controller);
 
-	if(app->role)
-	{
-		gtk_window_set_role(GTK_WINDOW(window), app->role);
-	}
+	#ifdef GDK_WINDOWING_X11
+	GdkSurface *surface = gtk_widget_get_surface(window);
+	GdkDisplay *display = gdk_surface_get_display(surface);
 
+	if(app->role && GDK_IS_X11_DISPLAY(display))
+	{
+		gdk_x11_surface_set_utf8_property(surface, "WM_ROLE", app->role);
+	}
+	#endif
+#ifdef G_OS_UNIX
 	g_unix_signal_add(SIGHUP, shutdown_signal_handler, app);
 	g_unix_signal_add(SIGINT, shutdown_signal_handler, app);
 	g_unix_signal_add(SIGTERM, shutdown_signal_handler, app);
+#endif
 
 	g_signal_connect(	controller,
 				"notify::idle",
@@ -190,11 +200,12 @@ initialize_gui(CelluloidApplication *app)
 				G_SETTINGS_BIND_GET );
 	g_settings_bind(	settings,
 				"dark-theme-enable",
-				gtk_settings_get_default(),
-				"gtk-application-prefer-dark-theme",
+				controller,
+				"dark-theme-enable",
 				G_SETTINGS_BIND_GET );
 
 	g_object_unref(settings);
+	adw_init();
 }
 
 static void
@@ -323,12 +334,7 @@ local_command_line(GApplication *gapp, gchar ***arguments, gint *exit_status)
 
 	while(argv[i])
 	{
-		// Ignore --mpv-options
-		const gboolean excluded =
-			g_str_has_prefix(argv[i], "--mpv-options") &&
-			argv[i][sizeof("--mpv-options")] != '=';
-
-		if(!excluded && g_str_has_prefix(argv[i], MPV_OPTION_PREFIX))
+		if(g_str_has_prefix(argv[i], MPV_OPTION_PREFIX))
 		{
 			const gchar *suffix =
 				argv[i] + sizeof(MPV_OPTION_PREFIX) - 1;
@@ -389,7 +395,6 @@ command_line_handler(	GApplication *gapp,
 	GVariantDict *options = g_application_command_line_get_options_dict(cli);
 	GSettings *settings = g_settings_new(CONFIG_ROOT);
 	gboolean always_open_new_window = FALSE;
-	gchar *mpv_options = NULL;
 	const gint n_files = argc-1;
 	GFile *files[n_files];
 
@@ -402,24 +407,7 @@ command_line_handler(	GApplication *gapp,
 
 	g_variant_dict_lookup(options, "enqueue", "b", &app->enqueue);
 	g_variant_dict_lookup(options, "new-window", "b", &app->new_window);
-	g_variant_dict_lookup(options, "mpv-options", "s", &mpv_options);
 	g_variant_dict_lookup(options, "role", "s", &app->role);
-
-	/* Combine mpv options from --mpv-options and options matching
-	 * MPV_OPTION_PREFIX
-	 */
-	if(mpv_options)
-	{
-		gchar *old_mpv_options = app->mpv_options;
-
-		g_warning("--mpv-options is deprecated and will be removed in future versions. Use '--mpv-' prefix options instead.");
-
-		app->mpv_options =
-			g_strjoin(" ", mpv_options, app->mpv_options, NULL);
-
-		g_free(old_mpv_options);
-		g_free(mpv_options);
-	}
 
 	for(gint i = 0; i < n_files; i++)
 	{
@@ -452,8 +440,6 @@ command_line_handler(	GApplication *gapp,
 	{
 		g_object_unref(files[i]);
 	}
-
-	gdk_notify_startup_complete();
 
 	g_object_unref(settings);
 	g_strfreev(argv);

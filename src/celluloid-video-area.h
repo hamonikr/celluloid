@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2020 gnome-mpv
+ * Copyright (c) 2016-2022, 2024 gnome-mpv
  *
  * This file is part of Celluloid.
  *
@@ -29,7 +29,16 @@
 
 #define CELLULOID_TYPE_VIDEO_AREA (celluloid_video_area_get_type ())
 
-G_DECLARE_FINAL_TYPE(CelluloidVideoArea, celluloid_video_area, CELLULOID, VIDEO_AREA, GtkOverlay)
+G_DECLARE_FINAL_TYPE(CelluloidVideoArea, celluloid_video_area, CELLULOID, VIDEO_AREA, GtkBox)
+
+enum CelluloidVideoAreaStatus
+{
+	CELLULOID_VIDEO_AREA_STATUS_LOADING,
+	CELLULOID_VIDEO_AREA_STATUS_IDLE,
+	CELLULOID_VIDEO_AREA_STATUS_PLAYING
+};
+
+typedef enum CelluloidVideoAreaStatus CelluloidVideoAreaStatus;
 
 GtkWidget *
 celluloid_video_area_new(void);
@@ -43,22 +52,30 @@ celluloid_video_area_update_disc_list(	CelluloidVideoArea *hdr,
 					const GPtrArray *disc_list );
 
 void
-celluloid_video_area_set_fullscreen_state(	CelluloidVideoArea *area,
-						gboolean fullscreen );
+celluloid_video_area_show_toast_message(	CelluloidVideoArea *area,
+						const gchar *msg);
+
+void
+celluloid_video_area_set_reveal_control_box(	CelluloidVideoArea *area,
+						gboolean reveal );
 
 void
 celluloid_video_area_set_control_box_visible(	CelluloidVideoArea *area,
 						gboolean visible );
 
 void
-celluloid_video_area_set_use_opengl(	CelluloidVideoArea *area,
-					gboolean use_opengl );
+celluloid_video_area_set_status(	CelluloidVideoArea *area,
+					CelluloidVideoAreaStatus status );
+
+gboolean
+celluloid_video_area_get_control_box_visible(CelluloidVideoArea *area);
+
+void
+celluloid_video_area_set_use_floating_header_bar(	CelluloidVideoArea *area,
+							gboolean floating );
 
 void
 celluloid_video_area_queue_render(CelluloidVideoArea *area);
-
-GtkDrawingArea *
-celluloid_video_area_get_draw_area(CelluloidVideoArea *area);
 
 GtkGLArea *
 celluloid_video_area_get_gl_area(CelluloidVideoArea *area);

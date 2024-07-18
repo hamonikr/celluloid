@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2021 gnome-mpv
+ * Copyright (c) 2014-2022, 2024 gnome-mpv
  *
  * This file is part of Celluloid.
  *
@@ -36,9 +36,9 @@
 #define MPRIS_OBJ_ROOT_PATH "/org/mpris/MediaPlayer2"
 #define MPV_OPTION_PREFIX "--mpv-"
 #define PLAYLIST_DEFAULT_WIDTH 200
-#define PLAYLIST_MIN_WIDTH 20
 #define CSD_WIDTH_OFFSET 52
 #define CSD_HEIGHT_OFFSET 99
+#define COMPACT_THRESHOLD_OFFSET 100
 #define WAYLAND_NOCSD_HEIGHT_OFFSET 60
 #define MAIN_WINDOW_DEFAULT_WIDTH 625
 #define MAIN_WINDOW_DEFAULT_HEIGHT 400
@@ -89,21 +89,24 @@
 				.info = 0} }
 
 #define DEFAULT_KEYBINDS \
-	{	"Ctrl+o script-message celluloid-action win.show-open-dialog((false, false))",\
+	{	"Alt+0 set window-scale 0.5",\
+		"Alt+1 set window-scale 1.0",\
+		"Alt+2 set window-scale 2.0",\
+		"Ctrl+o script-message celluloid-action win.show-open-dialog((false, false))",\
 		"Ctrl+l script-message celluloid-action win.show-open-location-dialog(false)",\
+		"Ctrl+n script-message celluloid-action app.new-window",\
 		"Ctrl+Shift+o script-message celluloid-action win.show-open-dialog((false, true))",\
 		"Ctrl+Shift+l script-message celluloid-action win.show-open-location-dialog(true)",\
 		"Ctrl+Shift+s script-message celluloid-action win.save-playlist",\
 		"Ctrl+f script-message celluloid-action win.search-playlist",\
-		"Ctrl+q script-message celluloid-action win.quit",\
+		"Ctrl+q quit",\
 		"Ctrl+? script-message celluloid-action win.show-shortcuts-dialog",\
-		"Ctrl+p script-message celluloid-action win.show-preferences-dialog",\
-		"Ctrl+h script-message celluloid-action win.toggle-controls",\
+		"Ctrl+, script-message celluloid-action win.show-preferences-dialog",\
 		"F9 script-message celluloid-action win.toggle-playlist",\
-		"F10 script-message celluloid-action win.toggle-main-menu",\
 		"DEL script-message celluloid-action win.remove-selected-playlist-item",\
 		"U stop",\
 		"STOP stop",\
+		"F10 script-message celluloid-action win.toggle-main-menu",\
 		"F11 cycle fullscreen",\
 		"WHEEL_UP add volume 2",\
 		"WHEEL_DOWN add volume -2",\

@@ -1,5 +1,5 @@
 project('celluloid', 'c',
-  version: '0.21',
+  version: '0.27',
   meson_version: '>= 0.49.0',
   default_options: [
     'warning_level=2',
@@ -46,7 +46,7 @@ test_ldflags = [
 ]
 global_ldflags = []
 foreach ldflag : test_ldflags
-  if cc.has_argument(ldflag)
+  if cc.has_link_argument(ldflag)
     global_ldflags += ldflag
   endif
 endforeach

@@ -63,14 +63,10 @@ void
 celluloid_view_show_shortcuts_dialog(CelluloidView *view);
 
 void
-celluloid_view_show_about_dialog(CelluloidView *view);
+celluloid_view_show_about_window(CelluloidView *view);
 
 void
-celluloid_view_show_message_dialog(	CelluloidView *view,
-					GtkMessageType type,
-					const gchar *title,
-					const gchar *prefix,
-					const gchar *msg );
+celluloid_view_show_message_toast(CelluloidView *view, const gchar *msg);
 
 void
 celluloid_view_present(CelluloidView *view);
@@ -86,9 +82,6 @@ celluloid_view_queue_render(CelluloidView *view);
 
 void
 celluloid_view_make_gl_context_current(CelluloidView *view);
-
-void
-celluloid_view_set_use_opengl_cb(CelluloidView *view, gboolean use_opengl_cb);
 
 gint
 celluloid_view_get_scale_factor(CelluloidView *view);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2020 gnome-mpv
+ * Copyright (c) 2014-2022 gnome-mpv
  *
  * This file is part of Celluloid.
  *
@@ -27,7 +27,6 @@
 #include "celluloid-common.h"
 #include "celluloid-def.h"
 #include "celluloid-mpv.h"
-#include "celluloid-mpv-wrapper.h"
 #include "celluloid-main-window.h"
 #include "celluloid-control-box.h"
 
@@ -75,6 +74,27 @@ celluloid_metadata_entry_free(CelluloidMetadataEntry *entry)
 		g_free(entry->key);
 		g_free(entry->value);
 		g_free(entry);
+	}
+}
+
+CelluloidChapter *
+celluloid_chapter_new(void)
+{
+	CelluloidChapter *chapter = g_malloc(sizeof(CelluloidChapter));
+
+	chapter->title = NULL;
+	chapter->time = 0.0;
+
+	return chapter;
+}
+
+void
+celluloid_chapter_free(CelluloidChapter *chapter)
+{
+	if(chapter)
+	{
+		g_free(chapter->title);
+		g_free(chapter);
 	}
 }
 
@@ -130,6 +150,15 @@ get_scripts_dir_path(void)
 	return g_build_filename(	g_get_user_config_dir(),
 					CONFIG_DIR,
 					"scripts",
+					NULL );
+}
+
+gchar *
+get_script_opts_dir_path(void)
+{
+	return g_build_filename(	g_get_user_config_dir(),
+					CONFIG_DIR,
+					"script-opts",
 					NULL );
 }
 
@@ -207,22 +236,6 @@ g_source_clear(guint *tag)
 	return TRUE;
 }
 
-void *
-gslist_to_array(GSList *slist)
-{
-	void **result = g_malloc(sizeof(void **)*(g_slist_length(slist)+1));
-	gint i = 0;
-
-	for(GSList *iter = slist; iter; iter = g_slist_next(iter))
-	{
-		result[i++] = iter->data;
-	}
-
-	result[i] = NULL;
-
-	return result;
-}
-
 gchar *
 strnjoinv(const gchar *separator, const gchar **str_array, gsize count)
 {
@@ -235,6 +248,34 @@ strnjoinv(const gchar *separator, const gchar **str_array, gsize count)
 	result = g_strjoinv(separator, args);
 
 	g_free(args);
+
+	return result;
+}
+
+gchar *
+sanitize_utf8(const gchar *str, const gboolean label)
+{
+	gchar *result = NULL;
+	const gchar *end = NULL;
+	const gboolean valid = g_utf8_validate(str, -1, &end);
+
+	g_assert(end >= str && (end - str) <= G_MAXINT);
+
+	if(label && !valid)
+	{
+		result =	g_strdup_printf
+				(	"%.*s (%s)",
+					(gint)(end - str),
+					str,
+					_("invalid encoding") );
+	}
+	else
+	{
+		result =	g_strdup_printf
+				(	"%.*s",
+					(gint)(end - str),
+					str );
+	}
 
 	return result;
 }
@@ -293,4 +334,67 @@ activate_action_string(GActionMap *map, const gchar *str)
 	{
 		g_warning("Failed to activate action \"%s\"", str);
 	}
+}
+
+gboolean
+g_file_delete_recursive(	GFile *file,
+				GCancellable *cancellable,
+				GError **error)
+{
+	gboolean deleted =
+		FALSE;
+	GFileType type =
+		g_file_query_file_type
+		(file, G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS, cancellable);
+
+	if(type == G_FILE_TYPE_DIRECTORY)
+	{
+
+		GFileEnumerator *enumerator =
+			g_file_enumerate_children
+				(	file,
+					G_FILE_ATTRIBUTE_STANDARD_NAME,
+					G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
+					cancellable,
+					error );
+		GFileInfo *info =
+			g_file_enumerator_next_file
+			(enumerator, cancellable, error);
+
+		while(info)
+		{
+			GFile *child =
+				g_file_enumerator_get_child
+				(enumerator, info);
+
+			g_file_delete_recursive(child, cancellable, error);
+			g_object_unref(info);
+
+			info =	(error && *error) ||
+				g_cancellable_is_cancelled(cancellable) ?
+				NULL :
+				g_file_enumerator_next_file
+				(enumerator, cancellable, error);
+		}
+
+		g_file_enumerator_close(enumerator, cancellable, error);
+
+		if((!error || !*error) && !g_cancellable_is_cancelled(cancellable))
+		{
+			deleted = g_file_delete(file, cancellable, error);
+		}
+	}
+	else if(type == G_FILE_TYPE_UNKNOWN)
+	{
+		gchar *uri = g_file_get_uri(file);
+
+		g_error("Found file with unknown type: %s", uri);
+		g_free(uri);
+	}
+	else
+	{
+		deleted = g_file_delete(file, cancellable, error);
+	}
+
+	return deleted;
 }

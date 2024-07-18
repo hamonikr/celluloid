@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2020 gnome-mpv
+ * Copyright (c) 2017-2023 gnome-mpv
  *
  * This file is part of Celluloid.
  *
@@ -21,9 +21,11 @@
 #include <glib.h>
 #include <glib/gprintf.h>
 #include <gtk/gtk.h>
+#ifdef G_OS_UNIX
 #include <glib-unix.h>
+#endif
 #include <locale.h>
-
+#include <adwaita.h>
 #include "celluloid-controller-private.h"
 #include "celluloid-controller.h"
 #include "celluloid-controller-actions.h"
@@ -61,11 +63,16 @@ boolean_to_loop(	GBinding *binding,
 			GValue *to_value,
 			gpointer data );
 
+
+static void
+set_video_area_status(	CelluloidController *controller,
+			CelluloidVideoAreaStatus status );
+
 static void
 mpris_enable_handler(GSettings *settings, gchar *key, gpointer data);
 
-static void
-media_keys_enable_handler(GSettings *settings, gchar *key, gpointer data);
+static gboolean
+initialize_model(gpointer data);
 
 static void
 view_ready_handler(CelluloidView *view, gpointer data);
@@ -74,7 +81,7 @@ static void
 render_handler(CelluloidView *view, gpointer data);
 
 static void
-preferences_updated_handler(CelluloidView *view, gpointer data);
+mpv_reset_request_handler(CelluloidView *view, gpointer data);
 
 static void
 audio_track_load_handler(CelluloidView *view, const gchar *uri, gpointer data);
@@ -89,18 +96,21 @@ subtitle_track_load_handler(	CelluloidView *view,
 
 static void
 file_open_handler(	CelluloidView *view,
-			const gchar **uri_list,
+			GListModel *files,
 			gboolean append,
 			gpointer data );
 
 static void
-grab_handler(CelluloidView *view, gboolean was_grabbed, gpointer data);
+is_active_handler(GObject *gobject, GParamSpec *pspec, gpointer data);
 
 static gboolean
-delete_handler(CelluloidView *view, GdkEvent *event, gpointer data);
+close_request_handler(CelluloidView *view, gpointer data);
 
 static void
 playlist_item_activated_handler(CelluloidView *view, gint pos, gpointer data);
+
+static void
+playlist_item_inserted_handler(CelluloidView *view, gint pos, gpointer data);
 
 static void
 playlist_item_deleted_handler(CelluloidView *view, gint pos, gpointer data);
@@ -114,6 +124,9 @@ playlist_reordered_handler(	CelluloidView *view,
 static void
 set_use_skip_button_for_playlist(	CelluloidController *controller,
 					gboolean value);
+
+static void
+set_dark_theme_enable(CelluloidController *controller, gboolean value);
 
 static void
 connect_signals(CelluloidController *controller);
@@ -143,10 +156,13 @@ static void
 model_ready_handler(GObject *object, GParamSpec *pspec, gpointer data);
 
 static void
+playlist_replaced_handler(CelluloidModel *model, gpointer data);
+
+static void
 frame_ready_handler(CelluloidModel *model, gpointer data);
 
 static void
-metadata_update_handler(CelluloidModel *model, gint64 pos, gpointer data);
+metadata_cache_update_handler(CelluloidModel *model, gint64 pos, gpointer data);
 
 static void
 window_resize_handler(	CelluloidModel *model,
@@ -205,6 +221,9 @@ static void
 previous_button_handler(GtkButton *button, gpointer data);
 
 static void
+playlist_button_handler(GtkButton *button, gpointer data);
+
+static void
 fullscreen_button_handler(GtkButton *button, gpointer data);
 
 static void
@@ -246,25 +265,17 @@ constructed(GObject *object)
 	celluloid_controller_input_connect_signals(controller);
 	update_extra_mpv_options(controller);
 
-	gtk_widget_show_all(GTK_WIDGET(window));
+	gtk_widget_add_controller(GTK_WIDGET(window), controller->key_controller);
+	gtk_widget_set_visible(GTK_WIDGET(window), TRUE);
 
 	g_signal_connect(	controller->settings,
 				"changed::mpris-enable",
 				G_CALLBACK(mpris_enable_handler),
 				controller );
-	g_signal_connect(	controller->settings,
-				"changed::media-keys-enable",
-				G_CALLBACK(media_keys_enable_handler),
-				controller );
 
 	if(g_settings_get_boolean(controller->settings, "mpris-enable"))
 	{
 		controller->mpris = celluloid_mpris_new(controller);
-	}
-
-	if(g_settings_get_boolean(controller->settings, "media-keys-enable"))
-	{
-		controller->media_keys = celluloid_media_keys_new(controller);
 	}
 
 	G_OBJECT_CLASS(celluloid_controller_parent_class)->constructed(object);
@@ -290,12 +301,23 @@ set_property(	GObject *object,
 
 		case PROP_IDLE:
 		self->idle = g_value_get_boolean(value);
+
+		if(!self->idle)
+		{
+			set_video_area_status
+				(self, CELLULOID_VIDEO_AREA_STATUS_PLAYING);
+		}
 		break;
 
 		case PROP_USE_SKIP_BUTTONS_FOR_PLAYLIST:
 		self->use_skip_buttons_for_playlist = g_value_get_boolean(value);
 		set_use_skip_button_for_playlist
 			(self, self->use_skip_buttons_for_playlist);
+		break;
+
+		case PROP_DARK_THEME_ENABLE:
+		self->dark_theme_enable = g_value_get_boolean(value);
+		set_dark_theme_enable(self, self->dark_theme_enable);
 		break;
 
 		default:
@@ -330,6 +352,10 @@ get_property(	GObject *object,
 		g_value_set_boolean(value, self->use_skip_buttons_for_playlist);
 		break;
 
+		case PROP_DARK_THEME_ENABLE:
+		g_value_set_boolean(value, self->dark_theme_enable);
+		break;
+
 		default:
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, property_id, pspec);
 		break;
@@ -343,7 +369,6 @@ dispose(GObject *object)
 
 	g_clear_object(&controller->settings);
 	g_clear_object(&controller->mpris);
-	g_clear_object(&controller->media_keys);
 
 	g_source_clear(&controller->update_seekbar_id);
 	g_source_clear(&controller->resize_timeout_tag);
@@ -352,7 +377,12 @@ dispose(GObject *object)
 	{
 		celluloid_view_make_gl_context_current(controller->view);
 		g_clear_object(&controller->model);
-		gtk_widget_destroy(GTK_WIDGET(controller->view));
+
+		// As of GTK 4.6.7, if the view is freed by calling
+		// g_object_unref(), it will never be removed from the list of
+		// toplevels. gtk_window_destroy() is used here instead to
+		// ensure that it's removed.
+		gtk_window_destroy(GTK_WINDOW(controller->view));
 		controller->view = NULL;
 	}
 
@@ -388,6 +418,17 @@ boolean_to_loop(	GBinding *binding,
 }
 
 static void
+set_video_area_status(	CelluloidController *controller,
+			CelluloidVideoAreaStatus status )
+{
+	CelluloidView *view = controller->view;
+	CelluloidMainWindow *window = celluloid_view_get_main_window(view);
+	CelluloidVideoArea *area = celluloid_main_window_get_video_area(window);
+
+	celluloid_video_area_set_status(area, status);
+}
+
+static void
 mpris_enable_handler(GSettings *settings, gchar *key, gpointer data)
 {
 	CelluloidController *controller = data;
@@ -402,32 +443,29 @@ mpris_enable_handler(GSettings *settings, gchar *key, gpointer data)
 	}
 }
 
-static void
-media_keys_enable_handler(GSettings *settings, gchar *key, gpointer data)
+static gboolean
+initialize_model(gpointer data)
 {
-	CelluloidController *controller = data;
+	CelluloidController *controller = CELLULOID_CONTROLLER(data);
+	CelluloidModel *model = controller->model;
+	CelluloidPlayer *player = CELLULOID_PLAYER(model);
+	CelluloidMpv *mpv = CELLULOID_MPV(model);
+	CelluloidView *view = controller->view;
+	gboolean maximized = FALSE;
 
-	if(!controller->media_keys && g_settings_get_boolean(settings, key))
-	{
-		controller->media_keys = celluloid_media_keys_new(controller);
-	}
-	else if(controller->media_keys)
-	{
-		g_clear_object(&controller->media_keys);
-	}
+	celluloid_player_options_init(player, CELLULOID_MAIN_WINDOW(view));
+	celluloid_model_initialize(model);
+
+	g_object_get(view, "maximized", &maximized, NULL);
+	celluloid_mpv_set_property_flag(mpv, "window-maximized", maximized);
+
+	return G_SOURCE_REMOVE;
 }
 
 static void
 view_ready_handler(CelluloidView *view, gpointer data)
 {
-	CelluloidController *controller = CELLULOID_CONTROLLER(data);
-	CelluloidModel *model = controller->model;
-
-	celluloid_player_options_init
-		(	CELLULOID_PLAYER(controller->model),
-			CELLULOID_MAIN_WINDOW(controller->view) );
-
-	celluloid_model_initialize(model);
+	g_idle_add(initialize_model, data);
 }
 
 static void
@@ -447,7 +485,7 @@ render_handler(CelluloidView *view, gpointer data)
 }
 
 static void
-preferences_updated_handler(CelluloidView *view, gpointer data)
+mpv_reset_request_handler(CelluloidView *view, gpointer data)
 {
 	CelluloidController *controller = data;
 
@@ -479,30 +517,57 @@ subtitle_track_load_handler(	CelluloidView *view,
 
 static void
 file_open_handler(	CelluloidView *view,
-			const gchar **uri_list,
+			GListModel *files,
 			gboolean append,
 			gpointer data )
 {
-	for(const gchar **iter = uri_list; iter && *iter; iter++)
+	CelluloidController *controller = CELLULOID_CONTROLLER(data);
+	CelluloidModel *model = controller->model;
+	const gchar *subtitle_exts[] = SUBTITLE_EXTS;
+	gboolean has_media_file = FALSE;
+	guint files_count = g_list_model_get_n_items(files);
+
+	if(files_count > 0 && !append)
 	{
-		celluloid_model_load_file
-			(	CELLULOID_CONTROLLER(data)->model,
-				*iter,
-				append || iter != uri_list );
+		set_video_area_status
+			(controller, CELLULOID_VIDEO_AREA_STATUS_LOADING);
+	}
+
+	for(guint i = 0; i < files_count; i++)
+	{
+		GFile *file = g_list_model_get_item(files, i);
+		gchar *uri = g_file_get_path(file) ?: g_file_get_uri(file);
+
+		has_media_file |= !extension_matches(uri, subtitle_exts);
+		celluloid_model_load_file(model, uri, append || i > 0);
+
+		g_free(uri);
+	}
+
+	if(!has_media_file)
+	{
+		set_video_area_status
+			(controller, CELLULOID_VIDEO_AREA_STATUS_PLAYING);
 	}
 }
 
 static void
-grab_handler(CelluloidView *view, gboolean was_grabbed, gpointer data)
+is_active_handler(GObject *gobject, GParamSpec *pspec, gpointer data)
 {
-	if(!was_grabbed)
+	CelluloidController *controller = CELLULOID_CONTROLLER(data);
+	CelluloidView *view = CELLULOID_VIEW(gobject);
+	gboolean is_active = TRUE;
+
+	g_object_get(view, "is-active", &is_active, NULL);
+
+	if(!is_active)
 	{
-		celluloid_model_reset_keys(CELLULOID_CONTROLLER(data)->model);
+		celluloid_model_reset_keys(controller->model);
 	}
 }
 
 static gboolean
-delete_handler(CelluloidView *view, GdkEvent *event, gpointer data)
+close_request_handler(CelluloidView *view, gpointer data)
 {
 	g_signal_emit_by_name(data, "shutdown");
 
@@ -513,19 +578,47 @@ static void
 playlist_item_activated_handler(CelluloidView *view, gint pos, gpointer data)
 {
 	CelluloidController *controller = CELLULOID_CONTROLLER(data);
+	CelluloidModel *model = controller->model;
 	gboolean idle_active = FALSE;
+	gint64 playlist_pos = -1;
 
-	g_object_get(controller->model, "idle-active", &idle_active, NULL);
-	celluloid_model_play(controller->model);
+	g_object_get(	model,
+			"idle-active", &idle_active,
+			"playlist-pos", &playlist_pos,
+			NULL );
+	celluloid_model_play(model);
 
 	if(idle_active)
 	{
 		controller->target_playlist_pos = pos;
 	}
+	else if(pos == playlist_pos)
+	{
+		celluloid_model_seek(model, 0.0);
+	}
 	else
 	{
-		celluloid_model_set_playlist_position(controller->model, pos);
+		celluloid_model_set_playlist_position(model, pos);
 	}
+}
+
+static void
+playlist_item_inserted_handler(CelluloidView *view, gint pos, gpointer data)
+{
+	CelluloidModel *model = CELLULOID_CONTROLLER(data)->model;
+	CelluloidMainWindow *window = CELLULOID_MAIN_WINDOW(view);
+	CelluloidPlaylistWidget *playlist = celluloid_main_window_get_playlist(window);
+	GPtrArray *contents = celluloid_playlist_widget_get_contents(playlist);
+
+	g_assert(contents->len > 0);
+	CelluloidPlaylistEntry *entry = g_ptr_array_index(contents, pos);
+
+	if((guint)pos != contents->len - 1)
+	{
+		g_warning("Playlist item inserted at non-last position. This is not yet supported. Appending to the playlist instead.");
+	}
+
+	celluloid_model_load_file(model, entry->filename, TRUE);
 }
 
 static void
@@ -568,16 +661,31 @@ set_use_skip_button_for_playlist(	CelluloidController *controller,
 }
 
 static void
+set_dark_theme_enable(	CelluloidController *controller,
+					gboolean value )
+{
+	if(controller->dark_theme_enable)
+	{
+		adw_style_manager_set_color_scheme
+			(	adw_style_manager_get_default(),
+				ADW_COLOR_SCHEME_PREFER_DARK );
+	}
+	else
+	{
+		adw_style_manager_set_color_scheme
+			(	adw_style_manager_get_default(),
+				ADW_COLOR_SCHEME_DEFAULT );
+	}
+}
+
+static void
 connect_signals(CelluloidController *controller)
 {
 	g_object_bind_property(	controller->model, "core-idle",
 				controller, "idle",
 				G_BINDING_DEFAULT );
-	g_object_bind_property(	controller->model, "border",
-				controller->view, "border",
-				G_BINDING_DEFAULT );
 	g_object_bind_property(	controller->model, "fullscreen",
-				controller->view, "fullscreen",
+				controller->view, "fullscreened",
 				G_BINDING_BIDIRECTIONAL );
 	g_object_bind_property(	controller->model, "window-maximized",
 				controller->view, "maximized",
@@ -585,8 +693,11 @@ connect_signals(CelluloidController *controller)
 	g_object_bind_property(	controller->model, "pause",
 				controller->view, "pause",
 				G_BINDING_DEFAULT );
+	g_object_bind_property(	controller->model, "idle-active",
+				controller->view, "idle-active",
+				G_BINDING_DEFAULT );
 	g_object_bind_property(	controller->model, "media-title",
-				controller->view, "title",
+				controller->view, "media-title",
 				G_BINDING_DEFAULT );
 	g_object_bind_property(	controller->model, "volume",
 				controller->view, "volume",
@@ -600,15 +711,15 @@ connect_signals(CelluloidController *controller)
 	g_object_bind_property(	controller->model, "playlist-pos",
 				controller->view, "playlist-pos",
 				G_BINDING_DEFAULT );
+	g_object_bind_property(	controller->model, "chapter-list",
+				controller->view, "chapter-list",
+				G_BINDING_DEFAULT );
 	g_object_bind_property(	controller->model, "track-list",
 				controller->view, "track-list",
 				G_BINDING_DEFAULT );
 	g_object_bind_property(	controller->model, "disc-list",
 				controller->view, "disc-list",
 				G_BINDING_DEFAULT );
-	g_object_bind_property(	controller->view, "display-fps",
-				controller->model, "display-fps",
-				G_BINDING_DEFAULT|G_BINDING_SYNC_CREATE );
 	g_object_bind_property_full(	controller->view, "loop",
 					controller->model, "loop-playlist",
 					G_BINDING_BIDIRECTIONAL|
@@ -642,12 +753,16 @@ connect_signals(CelluloidController *controller)
 				G_CALLBACK(window_scale_handler),
 				controller );
 	g_signal_connect(	controller->model,
+				"playlist-replaced",
+				G_CALLBACK(playlist_replaced_handler),
+				controller );
+	g_signal_connect(	controller->model,
 				"frame-ready",
 				G_CALLBACK(frame_ready_handler),
 				controller );
 	g_signal_connect(	controller->model,
-				"metadata-update",
-				G_CALLBACK(metadata_update_handler),
+				"metadata-cache-update",
+				G_CALLBACK(metadata_cache_update_handler),
 				controller );
 	g_signal_connect(	controller->model,
 				"window-resize",
@@ -707,6 +822,10 @@ connect_signals(CelluloidController *controller)
 				G_CALLBACK(previous_button_handler),
 				controller );
 	g_signal_connect(	controller->view,
+				"button-clicked::playlist",
+				G_CALLBACK(playlist_button_handler),
+				controller );
+	g_signal_connect(	controller->view,
 				"button-clicked::fullscreen",
 				G_CALLBACK(fullscreen_button_handler),
 				controller );
@@ -724,8 +843,8 @@ connect_signals(CelluloidController *controller)
 				G_CALLBACK(render_handler),
 				controller );
 	g_signal_connect(	controller->view,
-				"preferences-updated",
-				G_CALLBACK(preferences_updated_handler),
+				"mpv-reset-request",
+				G_CALLBACK(mpv_reset_request_handler),
 				controller );
 	g_signal_connect(	controller->view,
 				"audio-track-load",
@@ -744,16 +863,20 @@ connect_signals(CelluloidController *controller)
 				G_CALLBACK(file_open_handler),
 				controller );
 	g_signal_connect(	controller->view,
-				"grab-notify",
-				G_CALLBACK(grab_handler),
+				"notify::is-active",
+				G_CALLBACK(is_active_handler),
 				controller );
 	g_signal_connect(	controller->view,
-				"delete-event",
-				G_CALLBACK(delete_handler),
+				"close-request",
+				G_CALLBACK(close_request_handler),
 				controller );
 	g_signal_connect(	controller->view,
 				"playlist-item-activated",
 				G_CALLBACK(playlist_item_activated_handler),
+				controller );
+	g_signal_connect(	controller->view,
+				"playlist-item-inserted",
+				G_CALLBACK(playlist_item_inserted_handler),
 				controller );
 	g_signal_connect(	controller->view,
 				"playlist-item-deleted",
@@ -792,19 +915,33 @@ is_more_than_one(	GBinding *binding,
 static void
 idle_active_handler(GObject *object, GParamSpec *pspec, gpointer data)
 {
-	CelluloidController *controller = data;
+	CelluloidController *controller = CELLULOID_CONTROLLER(data);
+	CelluloidModel *model = controller->model;
+	CelluloidView *view = controller->view;
 	gboolean idle_active = TRUE;
 
 	g_object_get(object, "idle-active", &idle_active, NULL);
 
 	if(idle_active)
 	{
-		celluloid_view_reset(CELLULOID_CONTROLLER(data)->view);
+		GPtrArray *playlist = NULL;
+
+		// The "playlist-count" property may not yet be updated at this
+		// point, so we need to use "playlist" directly.
+		g_object_get(model, "playlist", &playlist, NULL);
+
+		celluloid_view_reset(view);
+
+		if(playlist->len <= 0)
+		{
+			set_video_area_status
+				(controller, CELLULOID_VIDEO_AREA_STATUS_IDLE);
+		}
 	}
 	else if(controller->target_playlist_pos >= 0)
 	{
 		celluloid_model_set_playlist_position
-			(controller->model, controller->target_playlist_pos);
+			(model, controller->target_playlist_pos);
 	}
 }
 
@@ -867,7 +1004,7 @@ window_scale_handler(GObject *object, GParamSpec *pspec, gpointer data)
 	window_scale = MIN(	width/(gdouble)video_width,
 				height/(gdouble)video_height );
 
-	if(ABS(window_scale-new_window_scale) > 0.0001)
+	if(window_scale > 0.0 && ABS(window_scale-new_window_scale) > 0.0001)
 	{
 		celluloid_controller_autofit(data, new_window_scale);
 	}
@@ -888,9 +1025,6 @@ model_ready_handler(GObject *object, GParamSpec *pspec, gpointer data)
 		use_opengl_cb =	celluloid_model_get_use_opengl_cb
 				(controller->model);
 
-		celluloid_view_set_use_opengl_cb
-			(controller->view, use_opengl_cb);
-
 		if(use_opengl_cb)
 		{
 			celluloid_view_make_gl_context_current(controller->view);
@@ -909,13 +1043,26 @@ model_ready_handler(GObject *object, GParamSpec *pspec, gpointer data)
 }
 
 static void
+playlist_replaced_handler(CelluloidModel *model, gpointer data)
+{
+	GSettings *settings = g_settings_new(CONFIG_ROOT);
+
+	if(g_settings_get_boolean(settings, "present-window-on-file-open"))
+	{
+		celluloid_view_present(CELLULOID_CONTROLLER(data)->view);
+	}
+
+	g_object_unref(settings);
+}
+
+static void
 frame_ready_handler(CelluloidModel *model, gpointer data)
 {
 	celluloid_view_queue_render(CELLULOID_CONTROLLER(data)->view);
 }
 
 static void
-metadata_update_handler(CelluloidModel *model, gint64 pos, gpointer data)
+metadata_cache_update_handler(CelluloidModel *model, gint64 pos, gpointer data)
 {
 	CelluloidView *view = CELLULOID_CONTROLLER(data)->view;
 	GPtrArray *playlist = NULL;
@@ -986,12 +1133,10 @@ message_handler(CelluloidMpv *mpv, const gchar *message, gpointer data)
 static void
 error_handler(CelluloidMpv *mpv, const gchar *message, gpointer data)
 {
-	celluloid_view_show_message_dialog
-		(	CELLULOID_CONTROLLER(data)->view,
-			GTK_MESSAGE_ERROR,
-			_("Error"),
-			NULL,
-			message );
+	CelluloidController *controller = CELLULOID_CONTROLLER(data);
+
+	celluloid_view_show_message_toast(controller->view, message);
+	set_video_area_status(controller, CELLULOID_VIDEO_AREA_STATUS_IDLE);
 }
 
 static void
@@ -1064,18 +1209,12 @@ fullscreen_handler(GObject *object, GParamSpec *pspec, gpointer data)
 	CelluloidMainWindow *window = celluloid_view_get_main_window(view);
 	GActionMap *map = G_ACTION_MAP(window);
 	GAction *toggle_playlist = NULL;
-	GAction *toggle_controls = NULL;
-	gboolean fullscreen = FALSE;
+	const gboolean fullscreen = gtk_window_is_fullscreen(GTK_WINDOW(view));
 
-	toggle_playlist = g_action_map_lookup_action(map, "toggle-playlist");
-	toggle_controls = g_action_map_lookup_action(map, "toggle-controls");
-
-	g_object_get(view, "fullscreen", &fullscreen, NULL);
-
+	toggle_playlist =
+		g_action_map_lookup_action(map, "toggle-playlist");
 	g_simple_action_set_enabled
 		(G_SIMPLE_ACTION(toggle_playlist), !fullscreen);
-	g_simple_action_set_enabled
-		(G_SIMPLE_ACTION(toggle_controls), !fullscreen);
 }
 
 static void
@@ -1159,13 +1298,23 @@ previous_button_handler(GtkButton *button, gpointer data)
 }
 
 static void
+playlist_button_handler(GtkButton *button, gpointer data)
+{
+	CelluloidView *view =
+		CELLULOID_CONTROLLER(data)->view;
+	const gboolean playlist_visible =
+		celluloid_view_get_playlist_visible(view);
+
+	celluloid_view_set_playlist_visible(view, !playlist_visible);
+}
+
+static void
 fullscreen_button_handler(GtkButton *button, gpointer data)
 {
 	CelluloidView *view = CELLULOID_CONTROLLER(data)->view;
-	gboolean fullscreen = FALSE;
+	const gboolean fullscreen = gtk_window_is_fullscreen(GTK_WINDOW(view));
 
-	g_object_get(view, "fullscreen", &fullscreen, NULL);
-	g_object_set(view, "fullscreen", !fullscreen, NULL);
+	g_object_set(view, "fullscreened", !fullscreen, NULL);
 }
 
 static void
@@ -1216,6 +1365,14 @@ celluloid_controller_class_init(CelluloidControllerClass *klass)
 			G_PARAM_READWRITE );
 	g_object_class_install_property(obj_class, PROP_USE_SKIP_BUTTONS_FOR_PLAYLIST, pspec);
 
+	pspec = g_param_spec_boolean
+		(	"dark-theme-enable",
+			"Enable dark theme",
+			"Whether or not to enable dark theme",
+			FALSE,
+			G_PARAM_READWRITE );
+	g_object_class_install_property(obj_class, PROP_DARK_THEME_ENABLE, pspec);
+
 	g_signal_new(	"shutdown",
 			G_TYPE_FROM_CLASS(klass),
 			G_SIGNAL_RUN_FIRST,
@@ -1230,6 +1387,11 @@ celluloid_controller_class_init(CelluloidControllerClass *klass)
 static void
 celluloid_controller_init(CelluloidController *controller)
 {
+	controller->key_controller = gtk_event_controller_key_new();
+
+	gtk_event_controller_set_propagation_phase
+		(controller->key_controller, GTK_PHASE_CAPTURE);
+
 	controller->app = NULL;
 	controller->model = NULL;
 	controller->view = NULL;
@@ -1240,7 +1402,6 @@ celluloid_controller_init(CelluloidController *controller)
 	controller->resize_timeout_tag = 0;
 	controller->skip_buttons_binding = NULL;
 	controller->settings = g_settings_new(CONFIG_ROOT);
-	controller->media_keys = NULL;
 	controller->mpris = NULL;
 }
 
@@ -1312,6 +1473,12 @@ celluloid_controller_open(	CelluloidController *controller,
 				const gchar *uri,
 				gboolean append )
 {
+	if(!append)
+	{
+		set_video_area_status
+			(controller, CELLULOID_VIDEO_AREA_STATUS_LOADING);
+	}
+
 	celluloid_model_load_file(controller->model, uri, append);
 }
 

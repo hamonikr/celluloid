@@ -1,3 +1,16 @@
+celluloid (0.27+h1) stable; urgency=medium
+
+  * Release for bookworm arm64
+  
+ -- HamoniKR <pkg@hamonikr.org>  Thu, 18 Jul 2024 21:13:35 +0900
+
+celluloid (0.27) stable; urgency=medium
+
+  * Release for bookworm arm64
+   - latest upstream v 0.27
+  
+ -- HamoniKR <pkg@hamonikr.org>  Thu, 18 Jul 2024 21:11:45 +0900
+
 celluloid (0.21.1-z9hamonikr4) stable; urgency=medium
 
   * Update Korean translation

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2020 gnome-mpv
+ * Copyright (c) 2016-2023 gnome-mpv
  *
  * This file is part of Celluloid.
  *
@@ -25,6 +25,18 @@
 #include "celluloid-time-label.h"
 #include "celluloid-common.h"
 
+enum
+{
+	PROP_0,
+	PROP_CHAPTER_LIST,
+	PROP_DURATION,
+	PROP_PAUSE,
+	PROP_ENABLED,
+	PROP_SHOW_LABEL,
+	PROP_POPOVER_Y_OFFSET,
+	N_PROPERTIES
+};
+
 struct _CelluloidSeekBar
 {
 	GtkBox parent_instance;
@@ -32,8 +44,13 @@ struct _CelluloidSeekBar
 	GtkWidget *label;
 	GtkWidget *popover;
 	GtkWidget *popover_label;
+	GPtrArray *chapter_list;
 	gdouble pos;
 	gdouble duration;
+	gboolean pause;
+	gboolean enabled;
+	gboolean show_label;
+	gint popover_y_offset;
 	gboolean popover_visible;
 	guint popover_timeout_id;
 };
@@ -47,19 +64,43 @@ static void
 dispose(GObject *object);
 
 static void
+set_property(	GObject *object,
+		guint property_id,
+		const GValue *value,
+		GParamSpec *pspec );
+
+static void
+get_property(	GObject *object,
+		guint property_id,
+		GValue *value,
+		GParamSpec *pspec );
+
+static void
 change_value_handler(	GtkWidget *widget,
 			GtkScrollType scroll,
 			gdouble value,
 			gpointer data );
 
 static gboolean
-enter_handler(GtkWidget *widget, GdkEventCrossing *event, gpointer data);
+enter_handler(	GtkEventControllerMotion *controller,
+		gdouble x,
+		gdouble y,
+		gpointer data );
 
 static gboolean
-leave_handler(GtkWidget *widget, GdkEventCrossing *event, gpointer data);
+leave_handler(GtkEventControllerMotion *widget, gpointer data);
 
 static gboolean
-motion_handler(GtkWidget *widget, GdkEventMotion *event, gpointer data);
+motion_handler(	GtkEventControllerMotion *controller,
+		gdouble x,
+		gdouble y,
+		gpointer data );
+
+static void
+update_chapter_list(CelluloidSeekBar *bar);
+
+static void
+update_label(CelluloidSeekBar *bar);
 
 static gboolean
 update_popover_visibility(CelluloidSeekBar *bar);
@@ -72,6 +113,91 @@ dispose(GObject *object)
 	g_clear_object(&CELLULOID_SEEK_BAR(object)->popover);
 
 	G_OBJECT_CLASS(celluloid_seek_bar_parent_class)->dispose(object);
+}
+
+static void
+set_property(	GObject *object,
+		guint property_id,
+		const GValue *value,
+		GParamSpec *pspec )
+{
+	CelluloidSeekBar *self = CELLULOID_SEEK_BAR(object);
+
+	switch(property_id)
+	{
+		case PROP_CHAPTER_LIST:
+		self->chapter_list = g_value_get_pointer(value);
+		update_chapter_list(self);
+		break;
+
+		case PROP_DURATION:
+		self->duration = g_value_get_double(value);
+		update_label(self);
+		break;
+
+		case PROP_PAUSE:
+		self->pause = g_value_get_boolean(value);
+		update_label(self);
+		break;
+
+		case PROP_ENABLED:
+		self->enabled = g_value_get_boolean(value);
+		update_label(self);
+		break;
+
+		case PROP_SHOW_LABEL:
+		self->show_label = g_value_get_boolean(value);
+		gtk_widget_set_visible(self->label, self->show_label);
+		break;
+
+		case PROP_POPOVER_Y_OFFSET:
+		self->popover_y_offset = g_value_get_int(value);
+		break;
+
+		default:
+		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, property_id, pspec);
+		break;
+	}
+}
+
+static void
+get_property(	GObject *object,
+		guint property_id,
+		GValue *value,
+		GParamSpec *pspec )
+{
+	CelluloidSeekBar *self = CELLULOID_SEEK_BAR(object);
+
+	switch(property_id)
+	{
+		case PROP_CHAPTER_LIST:
+		g_value_set_pointer(value, self->chapter_list);
+		break;
+
+		case PROP_DURATION:
+		g_value_set_double(value, self->duration);
+		break;
+
+		case PROP_PAUSE:
+		g_value_set_boolean(value, self->pause);
+		break;
+
+		case PROP_ENABLED:
+		g_value_set_boolean(value, self->enabled);
+		break;
+
+		case PROP_SHOW_LABEL:
+		g_value_set_boolean(value, self->show_label);
+		break;
+
+		case PROP_POPOVER_Y_OFFSET:
+		g_value_set_int(value, self->popover_y_offset);
+		break;
+
+		default:
+		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, property_id, pspec);
+		break;
+	}
 }
 
 static void
@@ -93,7 +219,10 @@ change_value_handler(	GtkWidget *widget,
 }
 
 static gboolean
-enter_handler(GtkWidget *widget, GdkEventCrossing *event, gpointer data)
+enter_handler(	GtkEventControllerMotion *controller,
+		gdouble x,
+		gdouble y,
+		gpointer data )
 {
 	CelluloidSeekBar *bar = data;
 
@@ -116,7 +245,7 @@ enter_handler(GtkWidget *widget, GdkEventCrossing *event, gpointer data)
 }
 
 static gboolean
-leave_handler(GtkWidget *widget, GdkEventCrossing *event, gpointer data)
+leave_handler(GtkEventControllerMotion *widget, gpointer data)
 {
 	CelluloidSeekBar *bar = data;
 
@@ -133,30 +262,137 @@ leave_handler(GtkWidget *widget, GdkEventCrossing *event, gpointer data)
 }
 
 static gboolean
-motion_handler(GtkWidget *widget, GdkEventMotion *event, gpointer data)
+motion_handler(	GtkEventControllerMotion *controller,
+		gdouble x,
+		gdouble y,
+		gpointer data )
 {
 	CelluloidSeekBar *bar = data;
-	GdkRectangle rect = {	.x = (gint)event->x,
-				.y = 0,
-				.width = 0,
-				.height = 0 };
-	GdkRectangle range_rect;
-	gdouble progress = 0;
-	gchar *text = NULL;
+	GtkRange *range = GTK_RANGE(bar->seek_bar);
+	GdkRectangle popover_rect = {0};
+	GdkRectangle range_rect = {0};
 
-	gtk_range_get_range_rect(GTK_RANGE(bar->seek_bar), &range_rect);
-	rect.x = CLAMP(rect.x, range_rect.x, range_rect.x + range_rect.width);
+	gtk_range_get_range_rect(range, &range_rect);
 
-	gtk_popover_set_pointing_to(GTK_POPOVER(bar->popover), &rect);
+	// TODO: Figure out how to get the actual margin
+	const gint margin = 1;
+	const gint trough_start = range_rect.x + margin;
+	const gint trough_length = range_rect.width - 2 * margin;
 
-	progress = rect.x / (gdouble)(range_rect.x + range_rect.width);
-	text = format_time(	(gint)(progress * bar->duration),
-				bar->duration >= 3600 );
-	gtk_label_set_text(GTK_LABEL(bar->popover_label), text);
+	x = CLAMP(x, trough_start, trough_start + trough_length);
 
-	g_free(text);
+	graphene_point_t popover_offset =
+		{0};
+	const gboolean popover_offset_computed =
+		gtk_widget_compute_point
+		(	GTK_WIDGET(range),
+			GTK_WIDGET(bar),
+			&GRAPHENE_POINT_INIT((gfloat)x, 0),
+			&popover_offset );
+
+	if(popover_offset_computed)
+	{
+		popover_rect.x = (gint)popover_offset.x;
+	}
+	else
+	{
+		// This seems to work for Adwaita
+		popover_rect.x = (gint)x + 13;
+		g_warning("Failed to determine position for timestamp popover");
+	}
+
+	popover_rect.y += bar->popover_y_offset;
+
+	gtk_popover_set_pointing_to(GTK_POPOVER(bar->popover), &popover_rect);
+
+	GtkAdjustment *adjustment = gtk_range_get_adjustment(range);
+	const gdouble lower = gtk_adjustment_get_lower(adjustment);
+	const gdouble upper = gtk_adjustment_get_upper(adjustment);
+	const gdouble page_size = gtk_adjustment_get_page_size(adjustment);
+
+	const gdouble progress =
+		((gint)x - trough_start) / (gdouble)trough_length;
+	const gdouble time =
+		lower + progress * (upper - lower - page_size);
+	gchar *time_text =
+		format_time((gint)time, bar->duration >= 3600);
+
+	GPtrArray *chapter_list = bar->chapter_list;
+	const gchar *title_text = NULL;
+
+	for(guint i = 0; !title_text && i < chapter_list->len; i++)
+	{
+		CelluloidChapter *chapter = g_ptr_array_index(chapter_list, i);
+
+		if(chapter->time > time)
+		{
+			// At this point, we should be looking at the chapter
+			// after the one we need. To get to the right chapter,
+			// subtract the index by one. If we're already at the
+			// first chapter, just pick that one.
+			chapter = g_ptr_array_index(chapter_list, MAX(1, i) - 1);
+			title_text = chapter->title;
+		}
+		else if(i == chapter_list->len - 1)
+		{
+			// The time should be beyond the last chapter's in this
+			// case, meaning the last chapter (the current index)
+			// is the one we need.
+			chapter = g_ptr_array_index(chapter_list, i);
+			title_text = chapter->title;
+		}
+	}
+
+	GtkLabel *label = GTK_LABEL(bar->popover_label);
+
+	if(title_text)
+	{
+		gchar *markup =
+			g_markup_printf_escaped
+			(	"<b>%s</b>\r<span>%s</span>",
+				title_text,
+				time_text );
+
+		gtk_label_set_markup(label, markup);
+		gtk_label_set_justify(label, GTK_JUSTIFY_CENTER);
+
+		g_free(markup);
+	}
+	else
+	{
+		gtk_label_set_text(label, time_text);
+	}
+
+	g_free(time_text);
 
 	return FALSE;
+}
+
+static void
+update_chapter_list(CelluloidSeekBar *bar)
+{
+	GtkScale *seek_bar = GTK_SCALE(bar->seek_bar);
+	GPtrArray *chapter_list = bar->chapter_list;
+
+	gtk_scale_clear_marks(seek_bar);
+
+	for(guint i = 0; i < chapter_list->len; i++)
+	{
+		CelluloidChapter *chapter = g_ptr_array_index(chapter_list, i);
+
+		gtk_scale_add_mark(seek_bar, chapter->time, GTK_POS_TOP, NULL);
+	}
+}
+
+static void
+update_label(CelluloidSeekBar *bar)
+{
+	// When disabled, the effective duration is zero regardless of what the
+	// value of the duration property is.
+	const gdouble duration = bar->enabled ? bar->duration : 0;
+
+	g_object_set(bar->label, "duration", (gint)duration, NULL);
+	gtk_range_set_range(GTK_RANGE(bar->seek_bar), 0, duration);
 }
 
 static gboolean
@@ -179,7 +415,66 @@ update_popover_visibility(CelluloidSeekBar *bar)
 static void
 celluloid_seek_bar_class_init(CelluloidSeekBarClass *klass)
 {
-	G_OBJECT_CLASS(klass)->dispose = dispose;
+	GObjectClass *object_class = G_OBJECT_CLASS(klass);
+	GtkWidgetClass *widget_class = GTK_WIDGET_CLASS(klass);
+	GParamSpec *pspec = NULL;
+
+	object_class->dispose = dispose;
+	object_class->set_property = set_property;
+	object_class->get_property = get_property;
+
+	gtk_widget_class_set_css_name(widget_class, "celluloid-seek-bar");
+
+	pspec = g_param_spec_pointer
+		(	"chapter-list",
+			"Chapter list",
+			"The list of chapters in the current file",
+			G_PARAM_READWRITE );
+	g_object_class_install_property(object_class, PROP_CHAPTER_LIST, pspec);
+
+	pspec = g_param_spec_double
+		(	"duration",
+			"Duration",
+			"The duration the seek bar is using",
+			0.0,
+			G_MAXDOUBLE,
+			0.0,
+			G_PARAM_READWRITE );
+	g_object_class_install_property(object_class, PROP_DURATION, pspec);
+
+	pspec = g_param_spec_boolean
+		(	"pause",
+			"Pause",
+			"Whether there is a file playing",
+			TRUE,
+			G_PARAM_READWRITE );
+	g_object_class_install_property(object_class, PROP_PAUSE, pspec);
+
+	pspec = g_param_spec_boolean
+		(	"enabled",
+			"Enabled",
+			"Whether or not the widget is enabled",
+			TRUE,
+			G_PARAM_READWRITE );
+	g_object_class_install_property(object_class, PROP_ENABLED, pspec);
+
+	pspec = g_param_spec_boolean
+		(	"show-label",
+			"Shoe label",
+			"Whether or not the timestamp/duration label is shown",
+			TRUE,
+			G_PARAM_READWRITE );
+	g_object_class_install_property(object_class, PROP_SHOW_LABEL, pspec);
+
+	pspec = g_param_spec_int
+		(	"popover-y-offset",
+			"Popover y-offset",
+			"The offset to add to the y-position of the popover",
+			G_MININT,
+			G_MAXINT,
+			0,
+			G_PARAM_READWRITE );
+	g_object_class_install_property(object_class, PROP_POPOVER_Y_OFFSET, pspec);
 
 	g_signal_new(	"seek",
 			G_TYPE_FROM_CLASS(klass),
@@ -198,9 +493,14 @@ celluloid_seek_bar_init(CelluloidSeekBar *bar)
 {
 	bar->seek_bar = gtk_scale_new(GTK_ORIENTATION_HORIZONTAL, NULL);
 	bar->label = celluloid_time_label_new();
-	bar->popover = g_object_ref_sink(gtk_popover_new(bar->seek_bar));
+	bar->popover = g_object_ref_sink(gtk_popover_new());
 	bar->popover_label = gtk_label_new(NULL);
+	bar->chapter_list = NULL;
 	bar->duration = 0;
+	bar->pause = TRUE;
+	bar->enabled = TRUE;
+	bar->show_label = TRUE;
+	bar->popover_y_offset = 0;
 	bar->pos = 0;
 	bar->popover_visible = FALSE;
 	bar->popover_timeout_id = 0;
@@ -209,36 +509,44 @@ celluloid_seek_bar_init(CelluloidSeekBar *bar)
 			"time", (gint)bar->pos,
 			"duration", (gint)bar->duration,
 			NULL );
-	gtk_popover_set_modal(GTK_POPOVER(bar->popover), FALSE);
+	gtk_popover_set_autohide(GTK_POPOVER(bar->popover), FALSE);
 
 	gtk_scale_set_draw_value(GTK_SCALE(bar->seek_bar), FALSE);
 	gtk_range_set_increments(GTK_RANGE(bar->seek_bar), 10, 10);
 	gtk_widget_set_can_focus(bar->seek_bar, FALSE);
-	gtk_widget_add_events(bar->seek_bar, GDK_POINTER_MOTION_MASK);
 
-	gtk_container_add(GTK_CONTAINER(bar->popover), bar->popover_label);
-	gtk_container_set_border_width(GTK_CONTAINER(bar->popover), 6);
-	gtk_widget_show(bar->popover_label);
+	gtk_popover_set_position(GTK_POPOVER(bar->popover), GTK_POS_TOP);
+	gtk_popover_set_child(GTK_POPOVER(bar->popover), bar->popover_label);
+	gtk_widget_set_visible(bar->popover_label, TRUE);
 
 	g_signal_connect(	bar->seek_bar,
 				"change-value",
 				G_CALLBACK(change_value_handler),
 				bar );
-	g_signal_connect(	bar->seek_bar,
-				"enter-notify-event",
+
+	GtkEventController *motion_controller =
+		gtk_event_controller_motion_new();
+
+	gtk_widget_add_controller(GTK_WIDGET(bar->seek_bar), motion_controller);
+
+	g_signal_connect(	motion_controller,
+				"enter",
 				G_CALLBACK(enter_handler),
 				bar );
-	g_signal_connect(	bar->seek_bar,
-				"leave-notify-event",
+	g_signal_connect(	motion_controller,
+				"leave",
 				G_CALLBACK(leave_handler),
 				bar );
-	g_signal_connect(	bar->seek_bar,
-				"motion-notify-event",
+	g_signal_connect(	motion_controller,
+				"motion",
 				G_CALLBACK(motion_handler),
 				bar );
 
-	gtk_box_pack_start(GTK_BOX(bar), bar->seek_bar, TRUE, TRUE, 0);
-	gtk_box_pack_end(GTK_BOX(bar), bar->label, FALSE, FALSE, 0);
+	gtk_widget_set_hexpand(bar->seek_bar, TRUE);
+
+	gtk_box_append(GTK_BOX(bar), bar->seek_bar);
+	gtk_box_append(GTK_BOX(bar), bar->label);
+	gtk_box_append(GTK_BOX(bar), bar->popover);
 }
 
 GtkWidget *
@@ -250,10 +558,7 @@ celluloid_seek_bar_new()
 void
 celluloid_seek_bar_set_duration(CelluloidSeekBar *bar, gdouble duration)
 {
-	bar->duration = duration;
-
-	g_object_set(bar->label, "duration", (gint)duration, NULL);
-	gtk_range_set_range(GTK_RANGE(bar->seek_bar), 0, duration);
+	g_object_set(bar, "duration", duration, NULL);
 }
 
 void
