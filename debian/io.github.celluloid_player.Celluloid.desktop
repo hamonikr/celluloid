@@ -1,6 +1,7 @@
 [Desktop Entry]
 Version=1.0
 Name=Celluloid
+Name[ko]=미디어 플레이어
 GenericName=Multimedia Player
 GenericName[am]=መገናኛ ማጫወቻ
 GenericName[ar]=مشغل الوسائط
@@ -163,6 +164,7 @@ Actions=new-window;
 
 [Desktop Action new-window]
 Name=New Window
+Name[ko]=새 창 열기
 Name[bg]=Нов прозорец
 Name[ca]=Finestra nova
 Name[cs]=Nové okno
